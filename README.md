@@ -4,7 +4,7 @@ A locally hosted dispatch system with a full-width operations map and an install
 
 ## Open and run in VS Code
 
-After cloning the published branch, open the `dispatch` folder in VS Code. Copy `.env.example` to `.env`, fill in your **rotated** Supabase project URL, anon key, and service-role key, then run `supabase/schema.sql` in the Supabase SQL Editor. In VS Code, press **F5** and choose **Dispatch — local Supabase backend**, or run **Terminal → Run Task → Dispatch: start locally**. The local launch configuration binds to `127.0.0.1:3000`; it does not expose the development server to your LAN. The `.env` file is ignored by Git and must never be committed.
+After cloning the published branch, open the `dispatch` folder in VS Code. Copy `.env.example` to `.env`, fill in your **rotated** Supabase project URL, anon key, and service-role key, then run `supabase/schema.sql` in the Supabase SQL Editor. In VS Code, press **F5** and choose **Dispatch — local Supabase backend**, or run **Terminal → Run Task → Dispatch: start locally**. The local launch configuration binds to `127.0.0.1:3000`; it does not expose the development server to your LAN. The `.env` file is ignored by Git and must never be committed. For local traffic demos, set `TOMTOM_API_KEY` in that local `.env`; the server uses it for proxied TomTom flow/tile requests without requiring a system-admin account. The environment key takes precedence over a key stored in Supabase settings and is never returned to the browser. Do not paste it into tracked source files.
 
 ## Supabase setup (required)
 
