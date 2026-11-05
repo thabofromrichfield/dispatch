@@ -48,7 +48,7 @@ function seed() {
     groups: ['North Sector','East Sector','West Sector','All units'], relays:[{id:'relay-main',name:'Johannesburg Control Node',host:'127.0.0.1',status:'configured',mode:'primary',lastCheck:null,latencyMs:null}], regions:[], scheduledMessages:[], callPatches:[], telemetry:[], emails:[], simulation:{active:false,startedAt:null,stoppedAt:null,units:{}}, updatedAt:date
   };
 }
-let cloudReady=false,cloudInitError=null,cloudWriteQueue=Promise.resolve();
+let cloudReady=false,cloudInitError=null,cloudWriteQueue=Promise.resolve(),cloudRecoveryTimer=null,cloudRecoveryDelay=5000;
 function cloudHeaders(extra={}){return {'apikey':SUPABASE_SERVICE_ROLE_KEY,'Authorization':`Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,'Content-Type':'application/json',...extra};}
 async function cloudRequest(path,options={}){
   if(!supabaseConfigured||!supabaseBaseValid)throw Object.assign(new Error('Supabase server configuration is missing or invalid'),{status:503});
@@ -71,10 +71,22 @@ async function initializeCloud(){
     cloudReady=true;cloudInitError=null;console.log('Supabase persistence initialized');return true;
   }catch(error){cloudInitError=`Supabase initialization failed (${error.status||'network'})`;console.error(cloudInitError);return false;}
 }
+function scheduleCloudRecovery(){
+  if(cloudReady||cloudRecoveryTimer||!supabaseConfigured||!supabaseBaseValid)return;
+  cloudRecoveryTimer=setTimeout(async()=>{
+    cloudRecoveryTimer=null;
+    if(cloudReady)return;
+    const recovered=await initializeCloud();
+    if(recovered){cloudRecoveryDelay=5000;console.log('Supabase persistence recovered');return;}
+    cloudRecoveryDelay=Math.min(60000,cloudRecoveryDelay*2);
+    scheduleCloudRecovery();
+  },cloudRecoveryDelay);
+  cloudRecoveryTimer.unref?.();
+}
 function save(){
   state.updatedAt=now();
   if(!supabaseConfigured||!cloudReady)return Promise.resolve();
-  const snapshot=structuredClone(state);const write=cloudWriteQueue.then(()=>persistCloudSnapshot(snapshot));cloudWriteQueue=write.catch(error=>{cloudReady=false;cloudInitError='Supabase state persistence failed';console.error(`Supabase state write failed (${error.status||'network'})`);});return write;
+  const snapshot=structuredClone(state);const write=cloudWriteQueue.then(()=>{if(!cloudReady)throw Object.assign(new Error('Supabase storage is unavailable'),{status:503});return persistCloudSnapshot(snapshot);});cloudWriteQueue=write.catch(error=>{cloudReady=false;cloudInitError=`Supabase state persistence failed (${error.status||'network'})`;console.error(cloudInitError);scheduleCloudRecovery();});return write;
 }
 let state;
 try { state = JSON.parse(fs.readFileSync(DB, 'utf8')); } catch { state = seed(); save(); }
@@ -158,7 +170,7 @@ const server=http.createServer(async(req,res)=>{
   if(url.pathname.startsWith('/api/')) {
     res.setHeader('Cache-Control','no-store');
     if(!supabaseConfigured||!supabaseBaseValid)return send(res,503,JSON.stringify({error:'Supabase server configuration is required.'}),'application/json; charset=utf-8');
-    if(!cloudReady)return send(res,503,JSON.stringify({error:'Supabase storage is not ready. Check the database schema and connection.'}),'application/json; charset=utf-8');
+    if(!cloudReady)return send(res,503,JSON.stringify({error:cloudInitError?`Supabase storage unavailable: ${cloudInitError}. Check the database schema and connection.`:'Supabase storage is not ready. Check the database schema and connection.'}),'application/json; charset=utf-8');
     const authUser=await currentUser(req,res);if(!authUser)return send(res,401,JSON.stringify({error:'Sign in required'}),'application/json; charset=utf-8');
     if(req.method==='POST'&&!originAllowed(req))return send(res,403,JSON.stringify({error:'Request origin rejected'}),'application/json; charset=utf-8');
     if(req.method==='POST'&&url.pathname==='/api/rtc/register'){try{const b=await readBody(req),peerId=String(b.peerId||''),role=b.role==='field'?'field':'control';if(!/^[a-zA-Z0-9_-]{12,80}$/.test(peerId))throw Error('Invalid voice peer id');if(role==='field'&&!state.officers.some(o=>o.id===b.officerId))throw Error('Choose a valid field terminal');rtcPeers.set(peerId,{peerId,role,officerId:role==='field'?b.officerId:'control',label:String(b.label||'').slice(0,80),lastSeen:Date.now()});return send(res,200,JSON.stringify({ok:true}),'application/json; charset=utf-8');}catch(e){return send(res,400,JSON.stringify({ok:false,error:e.message}),'application/json; charset=utf-8');}}
@@ -280,7 +292,7 @@ async function currentUser(req,res){
 function originAllowed(req){const origin=req.headers.origin;if(!origin)return true;try{const u=new URL(origin),host=req.headers['x-forwarded-host']||req.headers.host;return u.host===host;}catch{return false;}}
 function loginRateLimited(req){const key=req.socket.remoteAddress||'unknown',entry=loginAttempts.get(key)||{count:0,reset:Date.now()+15*60*1000};if(entry.reset<Date.now()){entry.count=0;entry.reset=Date.now()+15*60*1000;}entry.count++;loginAttempts.set(key,entry);return entry.count>12;}
 async function handleAuthApi(req,res,url){
-  if(url.pathname==='/api/auth/status'&&req.method==='GET')return send(res,200,JSON.stringify({configured:supabaseConfigured&&supabaseBaseValid,ready:cloudReady,message:!supabaseConfigured||!supabaseBaseValid?'Server credentials are not configured.':cloudInitError?'Supabase schema or connection needs attention.':null}),'application/json; charset=utf-8');
+  if(url.pathname==='/api/auth/status'&&req.method==='GET')return send(res,200,JSON.stringify({configured:supabaseConfigured&&supabaseBaseValid,ready:cloudReady,message:!supabaseConfigured||!supabaseBaseValid?'Server credentials are not configured.':cloudReady?null:cloudInitError||'Supabase schema or connection needs attention.'}),'application/json; charset=utf-8');
   if(!originAllowed(req))return send(res,403,JSON.stringify({error:'Request origin rejected'}),'application/json; charset=utf-8');
   if(url.pathname==='/api/auth/login'&&req.method==='POST'){
     const host=String(req.headers.host||'').split(':')[0];const localHost=['localhost','127.0.0.1','::1'].includes(host)||['127.0.0.1','::1','::ffff:127.0.0.1'].includes(req.socket.remoteAddress);if(String(process.env.DISPATCH_COOKIE_SECURE||'true').toLowerCase()!=='false'&&!requestIsHttps(req)&&!localHost)return send(res,426,JSON.stringify({error:'HTTPS is required for sign-in. Use a trusted TLS reverse proxy or local development on localhost.'}),'application/json; charset=utf-8');
@@ -316,4 +328,4 @@ setInterval(()=>{let dirty=false;const ms=Date.now();if(tickSimulation())dirty=t
 },5000).unref();
 const PORT=Number(process.env.PORT||3000);
 const startServer=()=>server.listen(PORT,process.env.HOST||'0.0.0.0',()=>console.log(`Dispatch Control Room running locally at http://localhost:${PORT}`));
-if(supabaseConfigured&&supabaseBaseValid)initializeCloud().finally(startServer);else startServer();
+if(supabaseConfigured&&supabaseBaseValid)initializeCloud().then(ready=>{if(!ready)scheduleCloudRecovery();}).finally(startServer);else startServer();
