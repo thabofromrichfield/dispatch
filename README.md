@@ -48,6 +48,10 @@ The app persists call/session records and saved recordings; live WebRTC audio is
 3. For voice, start a private/group/all call from **Voice dispatch**, accept it in the Field view, and grant microphone permission. Both clients need direct network reachability; no STUN/TURN or SIP/PBX gateway is bundled. Microphone use outside localhost requires a secure context.
 4. **Record local mic** captures a consented local microphone clip for playback; it does not silently record remote call audio.
 
+## Diagnostics and bug reports
+
+The local **Diagnostics** control records app-level function calls, UI actions, API outcomes, map errors, and server request status without capturing form values or secrets. Logs remain local; choose **Diagnostics → Download log** to create a JSON file you can attach to a bug report. See [DIAGNOSTICS.md](DIAGNOSTICS.md) for the full privacy notes and workflow.
+
 ## Android field APK
 
 The native Android project is under `android/`. It connects to the Dispatch server; it does not dial cellular calls, send SMS, or access the phone call log. Location uses Android GPS while clocked in and queues fixes offline. The phone must reach the server over HTTPS when secure cookies are enabled. Configure the server URL in the Android app; do not use `localhost` on a physical phone. To refresh bundled web assets, run `./scripts/sync-android-assets.sh`. Build with JDK 17 and Android SDK Platform 35:
