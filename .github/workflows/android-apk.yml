@@ -1,0 +1,57 @@
+name: Build Dispatch Android APK
+
+on:
+  push:
+    branches:
+      - main
+      - arena/9515cdac-dispatch
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-debug-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Install Android platform and build tools
+        shell: bash
+        run: |
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" -type f -name sdkmanager 2>/dev/null | sort | tail -n 1)"
+          if [ -z "$SDKMANAGER" ]; then echo "Android sdkmanager not found under $SDK_ROOT" >&2; exit 1; fi
+          echo "$(dirname "$SDKMANAGER")" >> "$GITHUB_PATH"
+          echo "$SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Build debug APK
+        shell: bash
+        run: |
+          set +e
+          ./android/gradlew --no-daemon -p android assembleDebug 2>&1 | tee /tmp/gradle-output.log
+          result=${PIPESTATUS[0]}
+          if [ "$result" -ne 0 ]; then
+            echo "Gradle failed; last output lines:" >> "$GITHUB_STEP_SUMMARY"
+            tail -n 35 /tmp/gradle-output.log >> "$GITHUB_STEP_SUMMARY"
+            while IFS= read -r line; do echo "::error title=Gradle build output::$line"; done < <(tail -n 35 /tmp/gradle-output.log)
+          fi
+          exit "$result"
+
+      - name: Publish installable APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: dispatch-field-debug-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14

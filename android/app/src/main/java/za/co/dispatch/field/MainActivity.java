@@ -175,7 +175,7 @@ public class MainActivity extends Activity {
 
         WebViewAssetLoader assetLoader = new WebViewAssetLoader.Builder()
                 .setDomain("appassets.androidplatform.net")
-                .addPathHandler("/", new WebViewAssetLoader.AssetsPathHandler(this, "public"))
+                .addPathHandler("/", new WebViewAssetLoader.AssetsPathHandler(this))
                 .build();
         webView.addJavascriptInterface(new DispatchBridge(this), "DispatchNative");
         webView.setWebViewClient(new WebViewClient() {
