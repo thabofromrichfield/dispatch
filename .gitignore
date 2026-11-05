@@ -1,0 +1,12 @@
+# Local operational records and backups contain location and radio data
+data/*
+!data/.gitkeep
+node_modules/
+.env
+.env.*
+!.env.example
+android/.gradle/
+android/local.properties
+android/.idea/
+android/**/build/
+.DS_Store
