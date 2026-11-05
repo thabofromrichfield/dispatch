@@ -164,3 +164,28 @@ body:has(.app-shell.map-first){padding:0}
 .diag-actions #diagDownload{border-color:rgba(52,211,153,.3);background:rgba(52,211,153,.12);color:#a7f3d0}
 .diag-actions #diagClear{grid-column:1/-1;color:#fda4af}
 @media(max-width:620px){.dispatch-diagnostics{right:8px;bottom:8px}.dispatch-diagnostics-panel{bottom:43px;width:min(340px,calc(100vw - 16px))}}
+
+
+/* Final map-first spacing: separate the floating chrome, map controls and lower docks. */
+.app-shell.map-first .dashboard-map .map-heading{top:82px;right:16px;left:16px;height:0;min-height:0;padding:0;border:0!important;background:transparent!important;box-shadow:none!important;pointer-events:none;overflow:visible}
+.app-shell.map-first .dashboard-map .map-heading>div:first-child{display:none!important}
+.app-shell.map-first .dashboard-map .map-heading>.map-tools{position:absolute;top:0;right:0;left:auto;z-index:640;max-width:calc(100vw - 32px);margin:0;pointer-events:auto}
+.app-shell.map-first .dashboard-map .map-wrap .leaflet-top.leaflet-left{top:84px;left:78px}
+.app-shell.map-first .dashboard-map .map-wrap .leaflet-top.leaflet-right{top:140px;right:12px}
+.app-shell.map-first .dashboard-map .map-wrap .maplibregl-ctrl-top-left{top:84px;left:78px}
+.app-shell.map-first .dashboard-map .map-wrap .maplibregl-ctrl-top-right{top:140px;right:12px}
+.app-shell.map-first .dashboard-map .map-info-drawer{bottom:16px}
+.app-shell.map-first .dashboard-map .map-fleet-dock{bottom:58px;width:min(760px,calc(100vw - 340px))}
+.admin-settings-notice{border-color:rgba(103,217,240,.2)!important}
+.admin-settings-notice .modal-body p{margin:0 0 10px;color:#cbd5e1;font-size:10px;line-height:1.65}
+.admin-settings-notice .modal-body p:last-child{margin-bottom:0}
+@media(max-width:900px){
+ .app-shell.map-first .dashboard-map .map-heading{top:65px;left:8px;right:8px}
+ .app-shell.map-first .dashboard-map .map-heading>.map-tools{top:0;right:0;left:auto;max-width:calc(100vw - 16px)}
+ .app-shell.map-first .dashboard-map .map-wrap .leaflet-top.leaflet-left{top:72px;left:8px}
+ .app-shell.map-first .dashboard-map .map-wrap .leaflet-top.leaflet-right{top:132px;right:8px}
+ .app-shell.map-first .dashboard-map .map-wrap .maplibregl-ctrl-top-left{top:72px;left:8px}
+ .app-shell.map-first .dashboard-map .map-wrap .maplibregl-ctrl-top-right{top:132px;right:8px}
+ .app-shell.map-first .dashboard-map .map-info-drawer{left:9px;bottom:16px}
+ .app-shell.map-first .dashboard-map .map-fleet-dock{right:auto;bottom:58px;left:50%;width:calc(100vw - 20px);transform:translateX(-50%)}
+}
