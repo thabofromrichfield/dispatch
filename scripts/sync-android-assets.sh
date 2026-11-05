@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-ASSETS="$ROOT/android/app/src/main/assets/public"
+ASSETS="$ROOT/android/app/src/main/assets"
 rm -rf "$ASSETS"
 mkdir -p "$ASSETS"
 cp -R "$ROOT/public/." "$ASSETS/"
