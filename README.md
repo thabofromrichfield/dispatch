@@ -39,7 +39,7 @@ The existing system state—including roster, sites, alerts, messages, call reco
 
 All `/api/*` operations other than the minimal auth status/login/logout routes require a verified Supabase session. Session tokens are held in HttpOnly, SameSite cookies; login attempts are rate-limited; sign-up is not exposed; account management and backup/restore are admin-only. HTTPS is required by default for non-local sign-in. Keep the Node service behind a trusted TLS proxy and firewall; do not expose the service-role key or an unprotected port. The Supabase service-role key bypasses RLS, so it must remain exclusively in the ignored server `.env` file.
 
-The app persists call/session records and saved recordings; live WebRTC audio is still an ephemeral peer-to-peer stream and is not itself written to the database unless a local microphone recording is explicitly saved. Browser map tiles and live TomTom flow tiles are fetched from their map providers, not stored in Supabase. TomTom credentials used by the map are part of the protected Dispatch settings and are sent to the browser only for the map provider request.
+The app persists call/session records and saved recordings; live WebRTC audio is still an ephemeral peer-to-peer stream and is not itself written to the database unless a local microphone recording is explicitly saved. Basemap tiles are fetched from their map providers, not stored in Supabase. In the browser client, TomTom flow samples and raster traffic tiles are proxied through the authenticated Dispatch server, so the TomTom key is not placed in browser traffic-tile URLs. The Android WebView continues to request TomTom raster tiles directly because its app-assets origin cannot use the browser's same-origin tile proxy.
 
 ## Exercise the system
 
@@ -69,4 +69,4 @@ No prebuilt APK is included. This workspace has no JDK or Android SDK, so the AP
 
 ## API notes
 
-Operational API routes require an authenticated cookie. Important routes include `GET /api/state`, `POST /api/action`, `POST /api/ingest/location`, `POST /api/traffic`, `GET /api/export`, `POST /api/backup`, `GET /api/backups`, and `POST /api/restore`. Public auth routes are limited to `GET /api/auth/status`, `POST /api/auth/login`, and `POST /api/auth/logout`; the user-management endpoints require an administrator session.
+Operational API routes require an authenticated cookie. Important routes include `GET /api/state`, `POST /api/action`, `POST /api/ingest/location`, `POST /api/traffic`, `POST /api/traffic/sample` (server-side TomTom flow sampling), `GET /api/traffic/tiles/flow/relative/{z}/{x}/{y}.png` (short-lived cached TomTom tile proxy), `GET /api/export`, `POST /api/backup`, `GET /api/backups`, and `POST /api/restore`. Public auth routes are limited to `GET /api/auth/status`, `POST /api/auth/login`, and `POST /api/auth/logout`; the user-management endpoints require an administrator session.
