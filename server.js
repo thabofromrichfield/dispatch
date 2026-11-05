@@ -18,6 +18,7 @@ try { for (const raw of fs.readFileSync(path.join(ROOT, '.env'), 'utf8').split(S
 const SUPABASE_URL = String(process.env.SUPABASE_URL || '').replace(/\/$/, '');
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || '';
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+const TOMTOM_API_KEY = String(process.env.TOMTOM_API_KEY || '').trim();
 const supabaseConfigured = Boolean(SUPABASE_URL && SUPABASE_ANON_KEY && SUPABASE_SERVICE_ROLE_KEY);
 const supabaseBaseValid = (()=>{try{const u=new URL(SUPABASE_URL);return ['https:','http:'].includes(u.protocol)&&!(u.protocol==='http:'&&!['localhost','127.0.0.1'].includes(u.hostname));}catch{return false;}})();
 const now = () => new Date().toISOString();
@@ -89,7 +90,8 @@ const rtcPeers=new Map(),rtcInbox=new Map(),trafficTileCache=new Map();
 
 function audit(action, target = '', actor = 'Local console') { state.audit.unshift({id:id('audit'), at:now(), actor, action, target}); state.audit = state.audit.slice(0, 3000); }
 function safeOfficer(o) { const { history, ...rest } = o; return {...rest, history: history || []}; }
-function clientStateForRole(role) { const body={...state,officers:state.officers.map(safeOfficer)}; if(role!=='admin') body.settings={...state.settings,trafficKey:'',trafficKeyConfigured:Boolean(state.settings.trafficKey)}; return body; }
+function trafficApiKey() { return TOMTOM_API_KEY || String(state.settings.trafficKey || '').trim(); }
+function clientStateForRole(role) { const body={...state,officers:state.officers.map(safeOfficer)}; body.settings={...state.settings,trafficKeyConfigured:Boolean(trafficApiKey())}; if(role!=='admin') body.settings.trafficKey=''; return body; }
 
 function processLocation(officer, point) {
   if(!officer.shiftId||!officer.tracking)return {ignored:true,reason:'Location sharing is off duty'};
@@ -126,7 +128,7 @@ function raiseAbsence(o,s) { if(state.alerts.some(a=>a.type==='absence'&&a.offic
 
 async function sampleTomTomTraffic(siteId,{force=false}={}){
   const site=state.sites.find(x=>x.id===siteId&&x.areaType==='work');if(!site)throw Object.assign(new Error('Unknown work site'),{status:400});
-  const key=String(state.settings.trafficKey||'');if(!key)throw Object.assign(new Error('Configure a TomTom Traffic Flow API key in Settings'),{status:409});
+  const key=trafficApiKey();if(!key)throw Object.assign(new Error('Configure TOMTOM_API_KEY in the server .env or set the key in administrator Settings'),{status:409});
   const previous=[...(state.traffic||[])].reverse().find(x=>x.siteId===site.id);
   if(!force&&previous&&Date.now()-Date.parse(previous.at)<5*60*1000)return {reading:previous,sampled:false};
   const lat=site.coordinates.reduce((n,p)=>n+Number(p[0]||0),0)/site.coordinates.length,lng=site.coordinates.reduce((n,p)=>n+Number(p[1]||0),0)/site.coordinates.length;if(!Number.isFinite(lat)||!Number.isFinite(lng)||Math.abs(lat)>90||Math.abs(lng)>180)throw Object.assign(new Error('Work site has invalid coordinates'),{status:400});
@@ -142,7 +144,7 @@ async function sampleTomTomTraffic(siteId,{force=false}={}){
 async function serveTomTomTrafficTile(res,url){
   const match=url.pathname.match(/^\/api\/traffic\/tiles\/flow\/relative\/(\d+)\/(\d+)\/(\d+)\.png$/);if(!match)return send(res,404,JSON.stringify({error:'Unknown traffic tile'}),'application/json; charset=utf-8');
   const z=Number(match[1]),x=Number(match[2]),y=Number(match[3]);if(!Number.isInteger(z)||z<0||z>20||!Number.isInteger(x)||!Number.isInteger(y)||x<0||y<0||x>=2**z||y>=2**z)return send(res,400,JSON.stringify({error:'Invalid tile coordinates'}),'application/json; charset=utf-8');
-  const key=String(state.settings.trafficKey||'');if(!key)return send(res,409,JSON.stringify({error:'TomTom Traffic is not configured'}),'application/json; charset=utf-8');
+  const key=trafficApiKey();if(!key)return send(res,409,JSON.stringify({error:'TomTom Traffic is not configured'}),'application/json; charset=utf-8');
   const keyFingerprint=crypto.createHash('sha256').update(key).digest('hex').slice(0,12),cacheKey=`${keyFingerprint}:${z}/${x}/${y}`,cached=trafficTileCache.get(cacheKey);if(cached&&cached.until>Date.now()){res.writeHead(200,{'Content-Type':cached.type,'Cache-Control':'private, max-age=30','X-Content-Type-Options':'nosniff'});return res.end(cached.data);}
   const upstream=new URL(`https://api.tomtom.com/traffic/map/4/tile/flow/relative/${z}/${x}/${y}.png`);upstream.searchParams.set('key',key);upstream.searchParams.set('tileSize','256');upstream.searchParams.set('thickness','8');
   try{const response=await fetch(upstream,{headers:{Accept:'image/png'},signal:AbortSignal.timeout(12000)});if(!response.ok)return send(res,502,JSON.stringify({error:`TomTom traffic tiles returned HTTP ${response.status}`}),'application/json; charset=utf-8');const data=Buffer.from(await response.arrayBuffer()),type=response.headers.get('content-type')||'image/png';if(data.length>2*1024*1024)return send(res,502,JSON.stringify({error:'TomTom traffic tile exceeded the allowed size'}),'application/json; charset=utf-8');if(trafficTileCache.size>300)trafficTileCache.clear();trafficTileCache.set(cacheKey,{data,type,until:Date.now()+30000});res.writeHead(200,{'Content-Type':type,'Cache-Control':'private, max-age=30','X-Content-Type-Options':'nosniff'});return res.end(data);}catch{return send(res,502,JSON.stringify({error:'Could not reach TomTom traffic tiles from the Dispatch server'}),'application/json; charset=utf-8');}
