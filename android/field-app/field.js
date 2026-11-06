@@ -32,6 +32,7 @@ async function api(path, method = 'GET', payload = null) {
   const result = await window.DispatchAPI.request(path, method, payload == null ? '' : JSON.stringify(payload));
   let data = {};
   try { data = result.body ? JSON.parse(result.body) : {}; } catch { data = {}; }
+  if (result.status === 304) return null;
   if (result.status < 200 || result.status >= 300 || data.ok === false) {
     const error = new Error(data.error || `Request failed (${result.status})`);
     error.status = result.status;
@@ -139,21 +140,31 @@ async function loadState(force = false) {
   if (stateBusy || (!force && Date.now() < stateRetryAt)) return;
   stateBusy = true;
   try {
-    const suffix = selectedOfficerId ? `?officerId=${encodeURIComponent(selectedOfficerId)}` : '';
-    try { fieldState = await api(`/api/field/state${suffix}`); }
-    catch (error) {
+    const query = new URLSearchParams();
+    if (selectedOfficerId) query.set('officerId', selectedOfficerId);
+    if (!force && fieldState?.updatedAt) query.set('since', fieldState.updatedAt);
+    let changed = false;
+    try {
+      const search = query.toString();
+      const next = await api(`/api/field/state${search ? `?${search}` : ''}`);
+      if (next) { fieldState = next; changed = true; }
+    } catch (error) {
       if (error.status === 404 && selectedOfficerId) {
         selectedOfficerId = '';
         localStorage.removeItem(OFFICER_KEY);
         fieldState = await api('/api/field/state');
+        changed = true;
       } else throw error;
     }
     stateFailures = 0;
     stateRetryAt = 0;
-    if (!selectedOfficerId && fieldState?.officer) selectedOfficerId = fieldState.officer.id;
-    localStorage.setItem(OFFICER_KEY, selectedOfficerId);
-    localStorage.setItem('dispatch-field-last-state', JSON.stringify(fieldState));
-    render();
+    if (!fieldState?.officer) throw new Error('The server returned no field unit state');
+    if (!selectedOfficerId) selectedOfficerId = fieldState.officer.id;
+    if (changed) {
+      localStorage.setItem(OFFICER_KEY, selectedOfficerId);
+      localStorage.setItem('dispatch-field-last-state', JSON.stringify(fieldState));
+      render();
+    } else $('#lastContact').textContent = `Last sync ${new Date().toLocaleTimeString('en-ZA', {hour:'2-digit',minute:'2-digit'})}`;
     await flushQueue();
     syncNativeTracking();
   } catch (error) {
@@ -208,7 +219,7 @@ async function enterField() {
   await loadState();
   showPanel('field');
   clearInterval(stateTimer);
-  stateTimer = setInterval(() => loadState().catch(handleNetworkError), 20000);
+  stateTimer = setInterval(() => loadState().catch(handleNetworkError), 3000);
   clearInterval(rtcTimer);
   rtcTimer = setInterval(() => rtcPulse().catch(() => {}), 2500);
   await rtcPulse();

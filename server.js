@@ -62,7 +62,7 @@ async function persistCloudSnapshot(snapshot){
   let lastError;
   for(let attempt=0;attempt<3;attempt++){
     try{
-      await cloudRequest('/rest/v1/dispatch_state?on_conflict=id',{method:'POST',headers:{Prefer:'resolution=merge-duplicates,return=minimal'},body:JSON.stringify({id:1,payload:snapshot,updated_at:now()})});
+      await cloudRequest('/rest/v1/dispatch_state?on_conflict=id',{method:'POST',headers:{Prefer:'resolution=merge-duplicates,return=minimal'},body:JSON.stringify({id:1,payload:snapshot,updated_at:snapshot.updatedAt||now()})});
       return;
     }catch(error){
       lastError=error;
@@ -77,12 +77,13 @@ async function initializeCloud(){
   cloudInitLastAttemptAt=Date.now();
   if(!supabaseConfigured||!supabaseBaseValid){cloudInitError='Supabase server configuration is missing or invalid';return false;}
   try{
-    const rows=await cloudRequest('/rest/v1/dispatch_state?select=payload&id=eq.1');
+    const rows=await cloudRequest('/rest/v1/dispatch_state?select=payload,updated_at&id=eq.1');
     const pendingCalls=Array.isArray(state?.calls)?state.calls.filter(call=>volatileCallIds.has(call.id)):[];
     if(Array.isArray(rows)&&rows.length){
       const remote=rows[0].payload;
       state=pendingCalls.length?{...remote,calls:[...pendingCalls,...(remote.calls||[]).filter(call=>!volatileCallIds.has(call.id))]}:remote;
     }else await persistCloudSnapshot(state);
+    if(rows?.[0]?.updated_at)state.updatedAt=rows[0].updated_at;
     state.locationEventIds ||= [];state.simulation ||= {active:false,startedAt:null,stoppedAt:null,units:{}};state.simulation.units ||= {};state.relays ||= [];state.settings ||= {};
     locationEventSet.clear();for(const key of state.locationEventIds)locationEventSet.add(key);
     cloudReady=true;cloudInitError=null;
@@ -91,11 +92,18 @@ async function initializeCloud(){
   }catch(error){cloudReady=false;cloudInitError=`Supabase initialization failed (${error.status||'network'})`;console.error(cloudInitError);return false;}
 }
 async function refreshCloudState(){
-  const rows=await cloudRequest('/rest/v1/dispatch_state?select=payload&id=eq.1');
+  const rows=await cloudRequest('/rest/v1/dispatch_state?select=payload,updated_at&id=eq.1');
   if(!Array.isArray(rows)||!rows[0]?.payload)throw Object.assign(new Error('Dispatch state is not initialized in Supabase'),{status:503});
-  state=rows[0].payload;state.locationEventIds ||= [];state.simulation ||= {active:false,startedAt:null,stoppedAt:null,units:{}};state.simulation.units ||= {};state.relays ||= [];state.settings ||= {};
+  state=rows[0].payload;if(rows[0].updated_at)state.updatedAt=rows[0].updated_at;state.locationEventIds ||= [];state.simulation ||= {active:false,startedAt:null,stoppedAt:null,units:{}};state.simulation.units ||= {};state.relays ||= [];state.settings ||= {};
   locationEventSet.clear();for(const key of state.locationEventIds)locationEventSet.add(key);
   cloudReady=true;cloudInitError=null;return state;
+}
+async function cloudStateUnchanged(since){
+  if(!since)return false;
+  const rows=await cloudRequest('/rest/v1/dispatch_state?select=updated_at&id=eq.1');
+  if(!Array.isArray(rows)||!rows[0]?.updated_at)return false;
+  if(String(rows[0].updated_at)!==String(since))return false;
+  return true;
 }
 async function acquireCloudStateLock(ownerToken){
   const deadline=Date.now()+10000;
@@ -145,12 +153,16 @@ if(!['Esri World Street Map','OpenStreetMap'].includes(state.settings.mapProvide
 if(state.settings.mapProvider==='OpenStreetMap'&&!state.settings.mapProviderUserSet){state.settings.mapProvider='Esri World Street Map';mapSettingsMigrated=true;}
 if(mapSettingsMigrated)save();
 const locationEventSet = new Set(state.locationEventIds);
-const RTC_PEER_TTL_MS=15000,presencePersistedAt=new Map(),rtcPeers=new Map(),rtcInbox=new Map(),trafficTileCache=new Map();
+const RTC_PEER_TTL_MS=15000,presencePersistedAt=new Map(),rtcPeers=new Map(),rtcInbox=new Map(),trafficTileCache=new Map(),trafficTileInFlight=new Map();
 
 function audit(action, target = '', actor = 'Local console') { state.audit.unshift({id:id('audit'), at:now(), actor, action, target}); state.audit = state.audit.slice(0, 3000); }
-function safeOfficer(o) { const { history, ...rest } = o; return {...rest, history: history || []}; }
+function safeOfficer(o) { const { history, ...rest } = o; return {...rest, historyCount:(history||[]).length,latestHistoryAt:history?.at(-1)?.receivedAt||null}; }
 function trafficApiKey() { return TOMTOM_API_KEY || String(state.settings.trafficKey || '').trim(); }
-function clientStateForAuthenticatedUser() { const body={...state,officers:state.officers.map(safeOfficer)}; body.settings={...state.settings,trafficKey:'',trafficKeyConfigured:Boolean(trafficApiKey())}; return body; }
+function clientStateForAuthenticatedUser() {
+  const {locationEventIds,...rest}=state;
+  const body={...rest,officers:state.officers.map(safeOfficer),recordings:state.recordings.map(({data,...recording})=>({...recording,hasData:Boolean(data)})),traffic:(state.traffic||[]).slice(-500)};
+  body.settings={...state.settings,trafficKey:'',trafficKeyConfigured:Boolean(trafficApiKey())};return body;
+}
 function fieldStateForAuthenticatedUser(officerId) {
   const officer=state.officers.find(x=>x.id===officerId);
   if(!officer)return null;
@@ -198,28 +210,58 @@ function sosLocationRecord(o,p,source='live-gps') { return {lat:p?.lat??null,lng
 function updateActiveSosLocation(o,p) { for(const a of state.alerts.filter(x=>x.type==='sos'&&x.officerId===o.id&&x.status!=='handled')){const record=sosLocationRecord(o,p,'live-gps');a.lat=record.lat;a.lng=record.lng;a.accuracy=record.accuracy;a.locationAt=record.locationAt;a.locationReceivedAt=record.receivedAt;a.offline=!o.online;a.sosSnapshot={...(a.sosSnapshot||{}),...record};a.locationHistory ||= [];a.locationHistory.push(record);if(a.locationHistory.length>10000)a.locationHistory.shift();} }
 function raiseAbsence(o,s) { if(state.alerts.some(a=>a.type==='absence'&&a.officerId===o.id&&a.shiftId===o.shiftId))return; const a=raiseAlert('absence','Officer has not reached site',`${o.callSign} · ${s.name}`,o,s); a.shiftId=o.shiftId; }
 
-async function sampleTomTomTraffic(siteId,{force=false}={}){
-  const site=state.sites.find(x=>x.id===siteId&&x.areaType==='work');if(!site)throw Object.assign(new Error('Unknown work site'),{status:400});
-  const key=trafficApiKey();if(!key)throw Object.assign(new Error('Configure TOMTOM_API_KEY in the server .env or set the key in Settings'),{status:409});
-  const previous=[...(state.traffic||[])].reverse().find(x=>x.siteId===site.id);
-  if(!force&&previous&&Date.now()-Date.parse(previous.at)<5*60*1000)return {reading:previous,sampled:false};
-  const lat=site.coordinates.reduce((n,p)=>n+Number(p[0]||0),0)/site.coordinates.length,lng=site.coordinates.reduce((n,p)=>n+Number(p[1]||0),0)/site.coordinates.length;if(!Number.isFinite(lat)||!Number.isFinite(lng)||Math.abs(lat)>90||Math.abs(lng)>180)throw Object.assign(new Error('Work site has invalid coordinates'),{status:400});
+async function fetchTomTomFlow(site,key){
+  const lat=site.coordinates.reduce((n,p)=>n+Number(p[0]||0),0)/site.coordinates.length,lng=site.coordinates.reduce((n,p)=>n+Number(p[1]||0),0)/site.coordinates.length;
+  if(!Number.isFinite(lat)||!Number.isFinite(lng)||Math.abs(lat)>90||Math.abs(lng)>180)throw Object.assign(new Error('Work site has invalid coordinates'),{status:400});
   const endpoint=new URL('https://api.tomtom.com/traffic/services/4/flowSegmentData/absolute/10/json');endpoint.searchParams.set('point',`${lat},${lng}`);endpoint.searchParams.set('key',key);
-  let response;try{response=await fetch(endpoint,{headers:{Accept:'application/json'},signal:AbortSignal.timeout(12000)});}catch{throw Object.assign(new Error('Could not reach TomTom Traffic API from the Dispatch server'),{status:502});}
+  let response;try{response=await fetch(endpoint,{headers:{Accept:'application/json'},signal:AbortSignal.timeout(6000)});}catch{throw Object.assign(new Error('Could not reach TomTom Traffic API from the Dispatch server'),{status:502});}
   if(!response.ok)throw Object.assign(new Error(`TomTom returned HTTP ${response.status}; check the Traffic Flow API permission, quota, and key restrictions`),{status:502});
   let data;try{data=await response.json();}catch{throw Object.assign(new Error('TomTom returned an unreadable traffic response'),{status:502});}
   const flow=data?.flowSegmentData,currentSpeed=Number(flow?.currentSpeed),freeFlowSpeed=Number(flow?.freeFlowSpeed);
   if(!Number.isFinite(currentSpeed)||!Number.isFinite(freeFlowSpeed)||freeFlowSpeed<=0)throw Object.assign(new Error('TomTom response has no valid flow segment for this site'),{status:502});
-  const ratio=Math.max(0,Math.min(1,currentSpeed/freeFlowSpeed)),reading={id:id('traffic'),siteId:site.id,at:now(),currentSpeed,freeFlowSpeed,confidence:Number(flow.confidence||0),roadClosure:Boolean(flow.roadClosure),ratio,level:flow.roadClosure?'stopped':ratio<.25?'heavy':ratio<.55?'slow':ratio<.8?'moderate':'free',provider:'TomTom'};
-  state.traffic.push(reading);if(state.traffic.length>100000)state.traffic.splice(0,1000);await save();return {reading,sampled:true};
+  const ratio=Math.max(0,Math.min(1,currentSpeed/freeFlowSpeed));return {id:id('traffic'),siteId:site.id,at:now(),currentSpeed,freeFlowSpeed,confidence:Number(flow.confidence||0),roadClosure:Boolean(flow.roadClosure),ratio,level:flow.roadClosure?'stopped':ratio<.25?'heavy':ratio<.55?'slow':ratio<.8?'moderate':'free',provider:'TomTom'};
+}
+function latestSiteTraffic(siteId){for(let i=(state.traffic||[]).length-1;i>=0;i--)if(state.traffic[i].siteId===siteId)return state.traffic[i];return null;}
+async function sampleTomTomTraffic(siteId,{force=false}={}){
+  const site=state.sites.find(x=>x.id===siteId&&x.areaType==='work');if(!site)throw Object.assign(new Error('Unknown work site'),{status:400});
+  const key=trafficApiKey();if(!key)throw Object.assign(new Error('Configure TOMTOM_API_KEY in the server .env or set the key in Settings'),{status:409});
+  const previous=latestSiteTraffic(site.id);if(!force&&previous&&Date.now()-Date.parse(previous.at)<5*60*1000)return {reading:previous,sampled:false};
+  const reading=await fetchTomTomFlow(site,key);state.traffic.push(reading);if(state.traffic.length>100000)state.traffic.splice(0,1000);await save();return {reading,sampled:true};
+}
+async function sampleTomTomTrafficBatch({force=false}={}){
+  const key=trafficApiKey();if(!key)throw Object.assign(new Error('Configure TOMTOM_API_KEY in the server .env or set the key in Settings'),{status:409});
+  const pending=state.sites.filter(site=>site.areaType==='work').filter(site=>{const latest=latestSiteTraffic(site.id);return force||!latest||Date.now()-Date.parse(latest.at)>=5*60*1000;});
+  if(!pending.length)return {sampled:false,sampledCount:0,failedCount:0,errors:[]};
+  const readings=[],errors=[];let next=0;
+  const worker=async()=>{while(next<pending.length){const site=pending[next++];try{readings.push(await fetchTomTomFlow(site,key));}catch(error){errors.push({siteId:site.id,siteName:site.name,error:error.message||'Traffic query failed'});}}};
+  await Promise.all(Array.from({length:Math.min(4,pending.length)},worker));
+  if(readings.length){state.traffic.push(...readings);if(state.traffic.length>100000)state.traffic.splice(0,Math.max(1000,state.traffic.length-100000));await save();}
+  if(!readings.length&&errors.length)throw Object.assign(new Error(errors[0].error),{status:502});
+  return {sampled:readings.length>0,sampledCount:readings.length,failedCount:errors.length,errors};
+}
+async function fetchTomTomTrafficTile(key,cacheKey,z,x,y){
+  const cached=trafficTileCache.get(cacheKey);
+  if(cached&&cached.until>Date.now())return cached;
+  if(trafficTileInFlight.has(cacheKey))return trafficTileInFlight.get(cacheKey);
+  const upstream=new URL(`https://api.tomtom.com/traffic/map/4/tile/flow/relative/${z}/${x}/${y}.png`);
+  upstream.searchParams.set('key',key);upstream.searchParams.set('tileSize','256');upstream.searchParams.set('thickness','8');
+  const pending=(async()=>{
+    const response=await fetch(upstream,{headers:{Accept:'image/png'},signal:AbortSignal.timeout(8000)});
+    if(!response.ok)throw Object.assign(new Error(`TomTom traffic tiles returned HTTP ${response.status}`),{status:502});
+    const data=Buffer.from(await response.arrayBuffer()),type=response.headers.get('content-type')||'image/png';
+    if(data.length>2*1024*1024)throw Object.assign(new Error('TomTom traffic tile exceeded the allowed size'),{status:502});
+    if(trafficTileCache.size>=300)trafficTileCache.delete(trafficTileCache.keys().next().value);
+    const tile={data,type,until:Date.now()+45000};trafficTileCache.set(cacheKey,tile);return tile;
+  })();
+  trafficTileInFlight.set(cacheKey,pending);
+  try{return await pending;}finally{if(trafficTileInFlight.get(cacheKey)===pending)trafficTileInFlight.delete(cacheKey);}
 }
 async function serveTomTomTrafficTile(res,url){
   const match=url.pathname.match(/^\/api\/traffic\/tiles\/flow\/relative\/(\d+)\/(\d+)\/(\d+)\.png$/);if(!match)return send(res,404,JSON.stringify({error:'Unknown traffic tile'}),'application/json; charset=utf-8');
   const z=Number(match[1]),x=Number(match[2]),y=Number(match[3]);if(!Number.isInteger(z)||z<0||z>20||!Number.isInteger(x)||!Number.isInteger(y)||x<0||y<0||x>=2**z||y>=2**z)return send(res,400,JSON.stringify({error:'Invalid tile coordinates'}),'application/json; charset=utf-8');
   const key=trafficApiKey();if(!key)return send(res,409,JSON.stringify({error:'TomTom Traffic is not configured'}),'application/json; charset=utf-8');
-  const keyFingerprint=crypto.createHash('sha256').update(key).digest('hex').slice(0,12),cacheKey=`${keyFingerprint}:${z}/${x}/${y}`,cached=trafficTileCache.get(cacheKey);if(cached&&cached.until>Date.now()){res.writeHead(200,{'Content-Type':cached.type,'Cache-Control':'private, max-age=30','X-Content-Type-Options':'nosniff'});return res.end(cached.data);}
-  const upstream=new URL(`https://api.tomtom.com/traffic/map/4/tile/flow/relative/${z}/${x}/${y}.png`);upstream.searchParams.set('key',key);upstream.searchParams.set('tileSize','256');upstream.searchParams.set('thickness','8');
-  try{const response=await fetch(upstream,{headers:{Accept:'image/png'},signal:AbortSignal.timeout(12000)});if(!response.ok)return send(res,502,JSON.stringify({error:`TomTom traffic tiles returned HTTP ${response.status}`}),'application/json; charset=utf-8');const data=Buffer.from(await response.arrayBuffer()),type=response.headers.get('content-type')||'image/png';if(data.length>2*1024*1024)return send(res,502,JSON.stringify({error:'TomTom traffic tile exceeded the allowed size'}),'application/json; charset=utf-8');if(trafficTileCache.size>300)trafficTileCache.clear();trafficTileCache.set(cacheKey,{data,type,until:Date.now()+30000});res.writeHead(200,{'Content-Type':type,'Cache-Control':'private, max-age=30','X-Content-Type-Options':'nosniff'});return res.end(data);}catch{return send(res,502,JSON.stringify({error:'Could not reach TomTom traffic tiles from the Dispatch server'}),'application/json; charset=utf-8');}
+  const keyFingerprint=crypto.createHash('sha256').update(key).digest('hex').slice(0,12),cacheKey=`${keyFingerprint}:${z}/${x}/${y}`;
+  try{const tile=await fetchTomTomTrafficTile(key,cacheKey,z,x,y);res.writeHead(200,{'Content-Type':tile.type,'Cache-Control':'private, max-age=30, stale-while-revalidate=30','X-Content-Type-Options':'nosniff'});return res.end(tile.data);}catch(error){return send(res,error.status||502,JSON.stringify({error:error.message||'Could not reach TomTom traffic tiles from the Dispatch server'}),'application/json; charset=utf-8');}
 }
 const MIME={'.html':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.js':'text/javascript; charset=utf-8','.json':'application/json; charset=utf-8','.webmanifest':'application/manifest+json; charset=utf-8','.svg':'image/svg+xml','.ico':'image/x-icon','.png':'image/png','.jpg':'image/jpeg','.webp':'image/webp','.woff2':'font/woff2','.woff':'font/woff'};
 const requestListener=async(req,res)=>{
@@ -247,10 +289,12 @@ const requestListener=async(req,res)=>{
       try{const b=await readBody(req),from=IS_VERCEL?await getLiveRtcPeer(b.fromPeer):rtcPeers.get(b.fromPeer),to=IS_VERCEL?await getLiveRtcPeer(b.toPeer):rtcPeers.get(b.toPeer);if(!from)throw Error('Caller voice client expired');if(!to)throw Error('Target terminal has no live voice client');if(!['offer','answer','ice','hangup','reject'].includes(b.type))throw Error('Invalid voice signal');const message={id:id('rtc'),at:now(),fromPeer:b.fromPeer,toPeer:b.toPeer,callId:String(b.callId||''),type:b.type,payload:b.payload||{}};if(IS_VERCEL)await enqueueRtcSignal(message);else{const queue=rtcInbox.get(b.toPeer)||[];if(queue.length>100)throw Error('Voice signal queue is full');queue.push(message);rtcInbox.set(b.toPeer,queue);}return send(res,200,JSON.stringify({ok:true}),'application/json; charset=utf-8');}catch(e){return send(res,409,JSON.stringify({ok:false,error:e.message}),'application/json; charset=utf-8');}
     }
     if(req.method==='GET'&&url.pathname==='/api/diagnostics/export') return send(res,200,JSON.stringify({events:exportDiagnosticEvents()}),'application/json; charset=utf-8');
-    if(req.method==='GET'&&url.pathname==='/api/state') { const since=url.searchParams.get('since'); const body=clientStateForAuthenticatedUser(); if(since && since===state.updatedAt) return send(res,304,''); return send(res,200,JSON.stringify(body),'application/json; charset=utf-8'); }
-    if(req.method==='GET'&&url.pathname==='/api/field/state') { const officerId=String(url.searchParams.get('officerId')||state.officers[0]?.id||'');const body=fieldStateForAuthenticatedUser(officerId);return body?send(res,200,JSON.stringify(body),'application/json; charset=utf-8'):send(res,404,JSON.stringify({error:'Choose a valid field terminal'}),'application/json; charset=utf-8'); }
+    if(req.method==='GET'&&url.pathname==='/api/state') { const since=url.searchParams.get('since');if(req.dispatchStateUnchanged||(since&&since===state.updatedAt))return send(res,304,'');const body=clientStateForAuthenticatedUser();return send(res,200,JSON.stringify(body),'application/json; charset=utf-8'); }
+    if(req.method==='GET'&&url.pathname==='/api/field/state') { if(req.dispatchStateUnchanged)return send(res,304,'');const officerId=String(url.searchParams.get('officerId')||state.officers[0]?.id||'');const since=url.searchParams.get('since');if(since&&since===state.updatedAt)return send(res,304,'');const body=fieldStateForAuthenticatedUser(officerId);return body?send(res,200,JSON.stringify(body),'application/json; charset=utf-8'):send(res,404,JSON.stringify({error:'Choose a valid field terminal'}),'application/json; charset=utf-8'); }
+    if(req.method==='GET'&&url.pathname==='/api/history') { const date=url.searchParams.get('date')||'',from=url.searchParams.get('from')||date,to=url.searchParams.get('to')||date,officerId=url.searchParams.get('officerId')||'all';const validDay=value=>!value||/^\d{4}-\d{2}-\d{2}$/.test(value);if(!validDay(from)||!validDay(to)|| (from&&to&&from>to))return send(res,400,JSON.stringify({error:'Use a valid date or date range'}),'application/json; charset=utf-8');const dayKey=value=>{try{return new Intl.DateTimeFormat('en-CA',{timeZone:state.settings.timezone||'UTC',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(value));}catch{return new Date(value).toISOString().slice(0,10);}};const officers=state.officers.filter(o=>officerId==='all'||o.id===officerId);if(officerId!=='all'&&!officers.length)return send(res,404,JSON.stringify({error:'Choose a valid field terminal'}),'application/json; charset=utf-8');const points=officers.flatMap(o=>(o.history||[]).filter(p=>{const day=dayKey(p.receivedAt);return (!from||day>=from)&&(!to||day<=to);}).map(p=>({eventId:p.eventId,lat:p.lat,lng:p.lng,accuracy:p.accuracy,speed:p.speed,phoneTime:p.phoneTime,receivedAt:p.receivedAt,officer:{id:o.id,callSign:o.callSign,name:o.name,color:o.color}}))).sort((a,b)=>a.receivedAt.localeCompare(b.receivedAt));const traffic=(state.traffic||[]).filter(t=>{const day=dayKey(t.at);return (!from||day>=from)&&(!to||day<=to);}).map(t=>({id:t.id,siteId:t.siteId,at:t.at,currentSpeed:t.currentSpeed,freeFlowSpeed:t.freeFlowSpeed,confidence:t.confidence,roadClosure:t.roadClosure,ratio:t.ratio,level:t.level,provider:t.provider}));const limit=20000;return send(res,200,JSON.stringify({points:points.slice(-limit),traffic:traffic.slice(-limit),positionCount:points.length,trafficCount:traffic.length,truncated:points.length>limit||traffic.length>limit}),'application/json; charset=utf-8'); }
+    if(req.method==='GET'&&url.pathname.startsWith('/api/recordings/')) { const recordingId=url.pathname.split('/').at(-1),recording=state.recordings.find(item=>item.id===recordingId);if(!recording?.data)return send(res,404,JSON.stringify({error:'Recording not found'}),'application/json; charset=utf-8');let data=String(recording.data),bytes;if(data.startsWith('data:')){const comma=data.indexOf(',');if(comma<0)return send(res,422,JSON.stringify({error:'Recording data is invalid'}),'application/json; charset=utf-8');bytes=data.slice(0,comma).includes(';base64')?Buffer.from(data.slice(comma+1),'base64'):Buffer.from(decodeURIComponent(data.slice(comma+1)));}else bytes=Buffer.from(data,'base64');const filename=String(recording.name||'dispatch-recording').replace(/[\r\n"]+/g,'_');res.writeHead(200,{'Content-Type':recording.mime||'application/octet-stream','Cache-Control':'private, max-age=60','Content-Disposition':`${url.searchParams.has('download')?'attachment':'inline'}; filename*=UTF-8''${encodeURIComponent(filename)}`,'X-Content-Type-Options':'nosniff'});return res.end(bytes); }
     if(req.method==='GET'&&url.pathname==='/api/export') { const format=url.searchParams.get('format')||'csv', type=url.searchParams.get('type')||'officers'; const rows=exportRows(type); if(format==='json')return send(res,200,JSON.stringify(rows,null,2),'application/json; charset=utf-8'); return send(res,200,toCsv(rows),'text/csv; charset=utf-8',{'Content-Disposition':`attachment; filename="dispatch-${type}-${new Date().toISOString().slice(0,10)}.csv"`}); }
-    if(req.method==='POST'&&url.pathname==='/api/traffic/sample') { try { const b=await readBody(req);const result=await sampleTomTomTraffic(String(b.siteId||''),{force:Boolean(b.force)});return send(res,200,JSON.stringify({ok:true,...result}),'application/json; charset=utf-8'); }catch(e){return send(res,e.status||502,JSON.stringify({ok:false,error:e.message||'Traffic sample failed'}),'application/json; charset=utf-8');} }
+    if(req.method==='POST'&&url.pathname==='/api/traffic/sample') { try { const b=await readBody(req);const result=b.siteId?await sampleTomTomTraffic(String(b.siteId),{force:Boolean(b.force)}):await sampleTomTomTrafficBatch({force:Boolean(b.force)});return send(res,200,JSON.stringify({ok:true,...result}),'application/json; charset=utf-8'); }catch(e){return send(res,e.status||502,JSON.stringify({ok:false,error:e.message||'Traffic sample failed'}),'application/json; charset=utf-8');} }
     if(req.method==='GET'&&url.pathname.startsWith('/api/traffic/tiles/flow/')) return serveTomTomTrafficTile(res,url);
     if(req.method==='POST'&&url.pathname==='/api/traffic') { try { const b=await readBody(req), site=state.sites.find(x=>x.id===b.siteId); if(!site)throw Error('Unknown site'); const currentSpeed=Number(b.currentSpeed),freeFlowSpeed=Number(b.freeFlowSpeed);if(!Number.isFinite(currentSpeed)||!Number.isFinite(freeFlowSpeed)||freeFlowSpeed<=0)throw Error('Invalid flow reading'); const ratio=Math.max(0,Math.min(1,currentSpeed/freeFlowSpeed));const level=b.roadClosure?'stopped':ratio<.25?'heavy':ratio<.55?'slow':ratio<.8?'moderate':'free'; const reading={id:id('traffic'),siteId:site.id,at:now(),currentSpeed,freeFlowSpeed,confidence:Number(b.confidence||0),roadClosure:Boolean(b.roadClosure),ratio,level,provider:'TomTom'};state.traffic.push(reading);if(state.traffic.length>100000)state.traffic.splice(0,1000);await save();return send(res,200,JSON.stringify({ok:true,reading}),'application/json; charset=utf-8'); } catch(e) { return send(res,e.status?503:400,JSON.stringify({ok:false,error:e.status?'Supabase persistence failed':e.message}),'application/json; charset=utf-8'); } }
     if(req.method==='POST'&&url.pathname==='/api/action') { try { const body=await readBody(req),criticalAction=['call-start','call-answer','call-fail','call-end','sos','sos-location'].includes(body.type),voiceCallAction=['call-start','call-answer','call-fail','call-end'].includes(body.type);if(!cloudReady&&!criticalAction)return send(res,503,JSON.stringify({ok:false,error:cloudInitError?`Supabase storage unavailable: ${cloudInitError}`:'Supabase storage is not ready'}),'application/json; charset=utf-8');recordDiagnostic('system.action',{action:String(body.type||'unknown').slice(0,80)},'info'); body.actor=authUser.email||'Authenticated user';const result=await action(body);let volatile=false;try{await save();}catch(error){if(!criticalAction)throw error;volatile=true;}if(criticalAction&&!cloudReady){volatile=true;if(voiceCallAction){const callId=result.call||body.id;if(callId)volatileCallIds.add(callId);}}return send(res,200,JSON.stringify({ok:true,result,state:clientStateForAuthenticatedUser(),volatile}),'application/json; charset=utf-8'); } catch(e) { return send(res,e.status?503:400,JSON.stringify({ok:false,error:e.status?'Supabase persistence failed':e.message}),'application/json; charset=utf-8'); } }
@@ -409,12 +453,14 @@ if(IS_VERCEL){
     let lockToken=null;const requestUrl=new URL(req.url,'http://localhost'),isApi=requestUrl.pathname.startsWith('/api/');
     try{
       if(isApi){await cloudInitialization;if(supabaseConfigured&&supabaseBaseValid&&!cloudReady&&Date.now()-cloudInitLastAttemptAt>=30000)await initializeCloud();}
-      const publicAuth=['/api/auth/status','/api/auth/login','/api/auth/logout','/api/auth/me','/api/auth/password'].includes(requestUrl.pathname),statelessRtc=requestUrl.pathname==='/api/rtc/poll'||requestUrl.pathname==='/api/rtc/signal',needsCloudState=isApi&&!publicAuth&&!statelessRtc;
+      const publicAuth=['/api/auth/status','/api/auth/login','/api/auth/logout','/api/auth/me','/api/auth/password'].includes(requestUrl.pathname),statelessRtc=requestUrl.pathname==='/api/rtc/poll'||requestUrl.pathname==='/api/rtc/signal',trafficTileRequest=req.method==='GET'&&requestUrl.pathname.startsWith('/api/traffic/tiles/flow/'),statePollRequest=req.method==='GET'&&['/api/state','/api/field/state'].includes(requestUrl.pathname),needsCloudState=isApi&&!publicAuth&&!statelessRtc&&!trafficTileRequest;
       if(needsCloudState&&cloudReady){
         if(req.method==='POST'&&requestUrl.pathname!=='/api/rtc/signal'){
           lockToken=crypto.randomUUID();await acquireCloudStateLock(lockToken);
         }
-        await refreshCloudState();
+        const since=statePollRequest?requestUrl.searchParams.get('since'):null;
+        if(statePollRequest&&since&&await cloudStateUnchanged(since))req.dispatchStateUnchanged=true;
+        else await refreshCloudState();
         if(lockToken){const lastMaintenanceAt=Date.parse(state.maintenanceAt||'');if(!Number.isFinite(lastMaintenanceAt)||Date.now()-lastMaintenanceAt>=5000){state.maintenanceAt=now();await runMaintenance();await save();}}
       }
       await requestListener(req,res);
@@ -425,5 +471,5 @@ if(IS_VERCEL){
       else if(!res.writableEnded)res.end();
     }finally{if(lockToken)await releaseCloudStateLock(lockToken);}
   }
-  module.exports=function vercelHandler(req,res){const pathname=new URL(req.url,'http://localhost').pathname;if(!pathname.startsWith('/api/'))return processVercelRequest(req,res);const task=vercelRequestQueue.then(()=>processVercelRequest(req,res));vercelRequestQueue=task.catch(()=>{});return task;};
+  module.exports=function vercelHandler(req,res){const pathname=new URL(req.url,'http://localhost').pathname;if(!pathname.startsWith('/api/'))return processVercelRequest(req,res);const independentRead=(req.method==='GET'&&pathname.startsWith('/api/traffic/tiles/flow/'))||pathname==='/api/rtc/poll'||pathname==='/api/rtc/signal';if(independentRead)return processVercelRequest(req,res);const task=vercelRequestQueue.then(()=>processVercelRequest(req,res));vercelRequestQueue=task.catch(()=>{});return task;};
 }else cloudInitialization.finally(startServer);
