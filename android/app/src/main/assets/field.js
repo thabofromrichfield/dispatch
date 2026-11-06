@@ -89,7 +89,9 @@ function render() {
   $('#shiftValue').textContent = officer.shiftId ? statusLabel(officer.status) : 'Off duty';
   $('#gpsValue').textContent = officer.accuracy == null ? 'Waiting' : `±${Math.round(officer.accuracy)} m`;
   $('#batteryValue').textContent = officer.battery == null ? '—' : `${Math.round(officer.battery)}%`;
-  const picker = $('#unitPicker');
+  const picker = $('#unitPicker'),pickerLabel = document.querySelector('.unit-picker-label'),canChooseUnit = currentUser?.role !== 'field';
+  if (pickerLabel) pickerLabel.hidden = !canChooseUnit;
+  picker.hidden = !canChooseUnit;
   picker.innerHTML = (fieldState.officers || []).map(unit => `<option value="${escapeHtml(unit.id)}" ${unit.id === officer.id ? 'selected' : ''}>${escapeHtml(selectedUnitOption(unit))}</option>`).join('');
   $('#sitePickerWrap').classList.toggle('hidden', Boolean(officer.shiftId));
   $('#sitePicker').innerHTML = (fieldState.sites || []).map(site => `<option value="${escapeHtml(site.id)}" ${site.id === officer.siteId ? 'selected' : ''}>${escapeHtml(site.name)}</option>`).join('');
@@ -141,7 +143,8 @@ async function loadState(force = false) {
   stateBusy = true;
   try {
     const query = new URLSearchParams();
-    if (selectedOfficerId) query.set('officerId', selectedOfficerId);
+    if (currentUser?.role === 'field') query.set('scope', 'unit');
+    if (selectedOfficerId && currentUser?.role !== 'field') query.set('officerId', selectedOfficerId);
     if (!force && fieldState?.updatedAt) query.set('since', fieldState.updatedAt);
     let changed = false;
     try {
@@ -159,7 +162,7 @@ async function loadState(force = false) {
     stateFailures = 0;
     stateRetryAt = 0;
     if (!fieldState?.officer) throw new Error('The server returned no field unit state');
-    if (!selectedOfficerId) selectedOfficerId = fieldState.officer.id;
+    if (currentUser?.role === 'field' || !selectedOfficerId) selectedOfficerId = fieldState.officer.id;
     if (changed) {
       localStorage.setItem(OFFICER_KEY, selectedOfficerId);
       localStorage.setItem('dispatch-field-last-state', JSON.stringify(fieldState));
@@ -214,8 +217,15 @@ async function login(email, password) {
   await enterField();
 }
 async function enterField() {
-  await api('/api/auth/me');
-  currentUser = true;
+  const session = await api('/api/auth/me');
+  currentUser = session.user;
+  const previousUser = localStorage.getItem('dispatch-field-user-id') || '';
+  if (previousUser && previousUser !== currentUser.id) {
+    localStorage.removeItem('dispatch-field-last-state');
+    localStorage.removeItem(QUEUE_KEY);
+    fieldState = null;
+  }
+  localStorage.setItem('dispatch-field-user-id', currentUser.id);
   await loadState();
   showPanel('field');
   clearInterval(stateTimer);
@@ -248,7 +258,7 @@ async function startShift() {
     return;
   }
   const siteId = $('#sitePicker').value;
-  if (!siteId) return toast('Choose a work site before clocking in.', true);
+  if (!siteId) return toast(currentUser?.role === 'field' ? 'Ask Control to assign this unit to a work site before clocking in.' : 'Choose a work site before clocking in.', true);
   await fieldAction('clock-in', { siteId });
   await fieldAction('field-presence', { online: true });
   toast('Shift started. GPS tracking is on.');
@@ -574,6 +584,8 @@ async function signOut() {
   fieldState = null;
   currentUser = null;
   localStorage.removeItem('dispatch-field-last-state');
+  localStorage.removeItem('dispatch-field-user-id');
+  localStorage.removeItem(QUEUE_KEY);
   showPanel('login');
   toast('Signed out.');
 }
@@ -624,7 +636,7 @@ async function boot() {
   if (!navigator.onLine) {
     try {
       const cached = localStorage.getItem('dispatch-field-last-state');
-      if (cached) { fieldState = JSON.parse(cached); showPanel('field'); render(); }
+      if (cached) { fieldState = JSON.parse(cached); if (fieldState?.officer) { const unit = fieldState.officer; fieldState.officers = [{ id: unit.id, name: unit.name, callSign: unit.callSign, shiftId: unit.shiftId, status: unit.status }]; fieldState.sites = (fieldState.sites || []).filter(site => site.id === unit.siteId); fieldState.messages = (fieldState.messages || []).filter(message => message.to === unit.id || (message.to === 'all' && (!message.group || message.group === unit.group))); fieldState.alerts = (fieldState.alerts || []).filter(alert => !alert.officerId || alert.officerId === unit.id); selectedOfficerId = unit.id; showPanel('field'); render(); } else showPanel('login'); }
       else showPanel('login');
     } catch (_) { showPanel('login'); }
     setNetworkBadge();

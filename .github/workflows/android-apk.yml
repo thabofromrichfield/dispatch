@@ -6,6 +6,7 @@ on:
       - main
       - arena/9515cdac-dispatch
       - arena/5d2050bc-dispatch
+      - arena/7e81c0d9-dispatch
   pull_request:
     branches:
       - main
