@@ -4161,34 +4161,6 @@ function geojsonSites() {
     features: [...S.sites.map((s) => feature(s, 'site')), ...S.regions.map((r) => feature(r, 'region'))],
   };
 }
-function geojsonUnits() {
-  return {
-    type: 'FeatureCollection',
-    features: S.officers
-      .filter((o) => Number.isFinite(o.lat) && Number.isFinite(o.lng))
-      .map((o) => ({
-        type: 'Feature',
-        geometry: { type: 'Point', coordinates: [o.lng, o.lat] },
-        properties: {
-          id: o.id,
-          name: o.name,
-          label: o.callSign,
-          color: !o.shiftId
-            ? '#949e99'
-            : o.stunned
-              ? '#c65b51'
-              : o.status === 'on-site'
-                ? '#4b9267'
-                : o.status === 'left-site'
-                  ? '#c65b51'
-                  : '#d59a39',
-          state: status(o),
-          online: o.online ? 'online' : 'offline',
-          battery: batteryPercent(o.battery),
-        },
-      })),
-  };
-}
 
 function libreStyle() {
   const raster =
