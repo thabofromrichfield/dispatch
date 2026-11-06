@@ -289,6 +289,36 @@ public class MainActivity extends Activity {
         super.onDestroy();
     }
 
+    private Button button(String text, boolean primary) {
+        Button button = new Button(this);
+        button.setText(text);
+        button.setAllCaps(false);
+        button.setTextColor(Color.WHITE);
+        button.setBackgroundColor(primary ? Color.rgb(37, 126, 213) : Color.rgb(28, 47, 68));
+        return button;
+    }
+
+    private int dp(float value) { return (int) (value * getResources().getDisplayMetrics().density + 0.5f); }
+    private LinearLayout.LayoutParams matchWrap() { return new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT); }
+    private LinearLayout.LayoutParams matchWidthWrap() { return matchWrap(); }
+
+    private static String normalizeServer(String raw) {
+        String value = raw == null ? "" : raw.trim();
+        while (value.endsWith("/")) value = value.substring(0, value.length() - 1);
+        return value;
+    }
+
+    private static boolean validServer(String value) {
+        try {
+            Uri uri = Uri.parse(value);
+            String scheme = uri.getScheme();
+            return "https".equalsIgnoreCase(scheme)
+                    && uri.getHost() != null && !uri.getHost().trim().isEmpty()
+                    && (uri.getPath() == null || uri.getPath().isEmpty() || "/".equals(uri.getPath()))
+                    && uri.getUserInfo() == null && uri.getQuery() == null && uri.getFragment() == null;
+        } catch (RuntimeException ignored) { return false; }
+    }
+
     private final class DispatchBridge {
         private final Context context;
         DispatchBridge(Context context) { this.context = context; }
