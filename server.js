@@ -253,7 +253,7 @@ const requestListener=async(req,res)=>{
   let file=decodeURIComponent(url.pathname);
   if(file==='/'||file==='/')file='/index.html';
   const target=path.resolve(PUBLIC,`.${file}`); if(!target.startsWith(PUBLIC+path.sep)){return send(res,403,'Forbidden','text/plain');}
-  fs.readFile(target,(e,content)=> e?send(res,404,'Not found','text/plain',{'Cache-Control':'no-store'}):send(res,200,content,MIME[path.extname(target)]||'application/octet-stream',{'Cache-Control':'no-cache'}));
+  try{const content=await fs.promises.readFile(target);send(res,200,content,MIME[path.extname(target)]||'application/octet-stream',{'Cache-Control':'no-cache'});}catch{send(res,404,'Not found','text/plain',{'Cache-Control':'no-store'});}
 };
 const server=http.createServer(requestListener);
 function makeSimulationRoute(officer,index){
@@ -394,11 +394,10 @@ const startServer=()=>server.listen(PORT,process.env.HOST||'0.0.0.0',()=>console
 const cloudInitialization=supabaseConfigured&&supabaseBaseValid?initializeCloud().then(ready=>{if(!ready&&!IS_VERCEL)scheduleCloudRecovery();return ready;}):Promise.resolve(false);
 if(IS_VERCEL){
   async function processVercelRequest(req,res){
-    let lockToken=null;
+    let lockToken=null;const requestUrl=new URL(req.url,'http://localhost'),isApi=requestUrl.pathname.startsWith('/api/');
     try{
-      await cloudInitialization;
-      if(supabaseConfigured&&supabaseBaseValid&&!cloudReady)await initializeCloud();
-      const requestUrl=new URL(req.url,'http://localhost'),isApi=requestUrl.pathname.startsWith('/api/'),publicAuth=['/api/auth/status','/api/auth/login','/api/auth/logout','/api/auth/me','/api/auth/password'].includes(requestUrl.pathname),needsCloudState=isApi&&!publicAuth;
+      if(isApi){await cloudInitialization;if(supabaseConfigured&&supabaseBaseValid&&!cloudReady)await initializeCloud();}
+      const publicAuth=['/api/auth/status','/api/auth/login','/api/auth/logout','/api/auth/me','/api/auth/password'].includes(requestUrl.pathname),needsCloudState=isApi&&!publicAuth;
       if(needsCloudState&&cloudReady){
         if(req.method==='POST'&&requestUrl.pathname!=='/api/rtc/signal'){
           lockToken=crypto.randomUUID();await acquireCloudStateLock(lockToken);
@@ -414,5 +413,5 @@ if(IS_VERCEL){
       else if(!res.writableEnded)res.end();
     }finally{if(lockToken)await releaseCloudStateLock(lockToken);}
   }
-  module.exports=function vercelHandler(req,res){const task=vercelRequestQueue.then(()=>processVercelRequest(req,res));vercelRequestQueue=task.catch(()=>{});return task;};
+  module.exports=function vercelHandler(req,res){const pathname=new URL(req.url,'http://localhost').pathname;if(!pathname.startsWith('/api/'))return processVercelRequest(req,res);const task=vercelRequestQueue.then(()=>processVercelRequest(req,res));vercelRequestQueue=task.catch(()=>{});return task;};
 }else cloudInitialization.finally(startServer);
