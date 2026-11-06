@@ -4,7 +4,7 @@ Dispatch now includes a local diagnostic recorder so you can reproduce a problem
 
 ## Use it
 
-1. Pull the latest `arena/0039368f-dispatch` branch and restart the Node app.
+1. Pull the latest `main` branch and restart the Node app.
 2. Open Dispatch and use the **Diagnostics** button at the bottom-right. Recording is on by default, including on the sign-in screen.
 3. Walk through the actions that lead to the problem. The recorder traces app-level global function calls, UI activations and safe keyboard actions, form submissions, API requests and results, map/tile failures, browser errors, and server API routes/actions.
 4. Open **Diagnostics → Download log** and attach the downloaded `dispatch-diagnostics-….json` file to your report. When an authenticated session is available, the download includes the server's recent diagnostic events too.

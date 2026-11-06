@@ -2,6 +2,8 @@ const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const { pointInPolygon, pointNearPolygon } = require('./src/geo');
+const { toCsv, csvCell } = require('./src/csv');
 
 const ROOT = __dirname;
 const PUBLIC = path.join(ROOT, 'public');
@@ -93,7 +95,6 @@ function seed() {
       backupRetention: 14,
       supervisor: '',
       soundEnabled: true,
-      liveMode: true,
     },
     sites: [],
     officers: [],
@@ -108,9 +109,7 @@ function seed() {
     regions: [],
     scheduledMessages: [],
     callPatches: [],
-    telemetry: [],
     emails: [],
-    simulation: { active: false, startedAt: null, stoppedAt: null, units: {} },
     updatedAt: date,
   };
 }
@@ -289,15 +288,8 @@ async function initializeCloud() {
     if (rows?.[0]?.updated_at) state.updatedAt = rows[0].updated_at;
     state.locationEventIds ||= [];
     state.locationEventIds = state.locationEventIds.slice(-2000);
-    state.simulation ||= { active: false, startedAt: null, stoppedAt: null, units: {} };
-    state.simulation.units ||= {};
     state.relays ||= [];
     state.settings ||= {};
-    const liveModeMigration = state.settings.liveMode !== true || Boolean(state.simulation.active);
-    state.settings.liveMode = true;
-    if (state.simulation.active) {
-      state.simulation = { ...state.simulation, active: false, stoppedAt: now(), units: {} };
-    }
     locationEventSet.clear();
     for (const key of state.locationEventIds) locationEventSet.add(key);
     await checkUnitSchema();
@@ -306,8 +298,7 @@ async function initializeCloud() {
     if (pendingCalls.length) {
       await persistCloudSnapshot(state, firstInitialization ? historicalRowsForState(state) : []);
       for (const call of pendingCalls) volatileCallIds.delete(call.id);
-    } else if (firstInitialization || liveModeMigration)
-      await persistCloudSnapshot(state, firstInitialization ? historicalRowsForState(state) : []);
+    } else if (firstInitialization) await persistCloudSnapshot(state, historicalRowsForState(state));
     console.log('Supabase persistence initialized');
     return true;
   } catch (error) {
@@ -325,12 +316,8 @@ async function refreshCloudState() {
   if (rows[0].updated_at) state.updatedAt = rows[0].updated_at;
   state.locationEventIds ||= [];
   state.locationEventIds = state.locationEventIds.slice(-2000);
-  state.simulation ||= { active: false, startedAt: null, stoppedAt: null, units: {} };
-  state.simulation.units ||= {};
   state.relays ||= [];
   state.settings ||= {};
-  state.settings.liveMode = true;
-  if (state.simulation.active) state.simulation = { ...state.simulation, active: false, stoppedAt: now(), units: {} };
   locationEventSet.clear();
   for (const key of state.locationEventIds) locationEventSet.add(key);
   cloudReady = true;
@@ -481,8 +468,6 @@ const backupFrequencyMigrated = state.settings.backupFrequency !== 'hourly';
 state.settings.backupFrequency = 'hourly';
 if (backupFrequencyMigrated)
   save().catch((error) => console.error('Could not persist hourly backup schedule:', error.message));
-state.simulation ||= { active: false, startedAt: null, stoppedAt: null, units: {} };
-state.simulation.units ||= {};
 state.relays ||= [];
 let relayMigration = false;
 for (const relay of state.relays)
@@ -662,7 +647,7 @@ function processLocation(officer, point) {
     speed,
     phoneTime: point.timestamp || receivedAt,
     receivedAt,
-    source: point.source === 'simulation' ? 'simulation' : 'live',
+    source: 'live',
   };
   if (!Number.isFinite(p.lat) || !Number.isFinite(p.lng) || Math.abs(p.lat) > 90 || Math.abs(p.lng) > 180)
     throw new Error('Invalid coordinates');
@@ -739,35 +724,6 @@ function processLocation(officer, point) {
     )
       raiseAlert('geofence', 'Restricted zone entered', `${officer.callSign} · ${region.name}`, officer, region, p);
   return { point: p };
-}
-function pointInPolygon(point, polygon = []) {
-  let inside = false;
-  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
-    const [yi, xi] = polygon[i],
-      [yj, xj] = polygon[j];
-    if (xi > point[1] !== xj > point[1] && point[0] < ((yj - yi) * (point[1] - xi)) / (xj - xi + 1e-12) + yi)
-      inside = !inside;
-  }
-  return inside;
-}
-function pointNearPolygon(point, polygon = [], toleranceMeters = 0) {
-  if (!toleranceMeters || polygon.length < 2) return false;
-  const latScale = 111320,
-    lonScale = 111320 * Math.cos((point[0] * Math.PI) / 180),
-    x = point[1] * lonScale,
-    y = point[0] * latScale;
-  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
-    const ax = polygon[j][1] * lonScale,
-      ay = polygon[j][0] * latScale,
-      bx = polygon[i][1] * lonScale,
-      by = polygon[i][0] * latScale,
-      dx = bx - ax,
-      dy = by - ay,
-      t = Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / (dx * dx + dy * dy || 1))),
-      dist = Math.hypot(x - (ax + t * dx), y - (ay + t * dy));
-    if (dist <= toleranceMeters) return true;
-  }
-  return false;
 }
 function raiseAlert(type, title, detail, officer, site, point = {}) {
   const duplicate = state.alerts.find(
@@ -1551,7 +1507,6 @@ const requestListener = async (req, res) => {
           );
         recordDiagnostic('system.action', { action: String(body.type || 'unknown').slice(0, 80) }, 'info');
         body.actor = authUser.email || 'Authenticated user';
-        if (body.type === 'live-mode') await clearDemoState(body.actor);
         if (body.type === 'officer-delete' && unitSchemaReady) {
           const account = await cloudRequest(
             `/rest/v1/dispatch_unit_accounts?select=user_id&officer_id=eq.${encodeURIComponent(String(body.officerId || ''))}&limit=1`,
@@ -1783,7 +1738,6 @@ const requestListener = async (req, res) => {
           state.locationEventIds.forEach((x) => locationEventSet.add(x));
           restoredAt = now();
         }
-        await clearDemoState(authUser.email);
         audit('Database restored', file, authUser.email);
         await save();
         return send(
@@ -1813,179 +1767,6 @@ const requestListener = async (req, res) => {
   }
 };
 const server = http.createServer(requestListener);
-function makeSimulationRoute(officer, index) {
-  const site =
-    state.sites.find((x) => x.id === officer.siteId && x.areaType === 'work') ||
-    state.sites.find((x) => x.areaType === 'work');
-  if (!site) return [];
-  const center = site.coordinates.reduce(
-    (a, p) => [a[0] + p[0] / site.coordinates.length, a[1] + p[1] / site.coordinates.length],
-    [0, 0],
-  );
-  const shift = ((index % 3) - 1) * 0.00035,
-    lat = center[0],
-    lng = center[1];
-  return [
-    [officer.lat, officer.lng],
-    [lat - 0.0012 + shift, lng - 0.0015],
-    [lat + 0.0001, lng - 0.0018 + shift],
-    [lat + 0.0012, lng + 0.0003],
-    [lat, lng],
-    [lat - 0.0011, lng + 0.0015 - shift],
-    [lat, lng],
-    [lat + 0.0012, lng - 0.0006],
-    [lat, lng],
-  ];
-}
-function localDistanceMeters(a, b) {
-  const lat = ((a[0] + b[0]) * Math.PI) / 360;
-  return Math.hypot((b[0] - a[0]) * 111320, (b[1] - a[1]) * 111320 * Math.cos(lat));
-}
-function tickSimulation() {
-  const sim = state.simulation;
-  if (state.settings.liveMode) {
-    if (sim?.active) {
-      state.simulation = { ...sim, active: false, stoppedAt: now(), units: {} };
-      return true;
-    }
-    return false;
-  }
-  if (!sim?.active) return false;
-  const stepSeconds = 5;
-  let changed = false;
-  for (const o of state.officers) {
-    const track = sim.units?.[o.id];
-    if (!track || !o.shiftId || !o.tracking || o.stunned) continue;
-    const route = track.route || [];
-    if (route.length < 2) continue;
-    const speed = 20 + ((track.sequence * 7 + track.seed * 11) % 27);
-    let moveMeters = ((speed * 1000) / 3600) * stepSeconds,
-      guard = 0;
-    while (moveMeters > 0 && guard++ < 20) {
-      const a = route[track.leg % route.length],
-        b = route[(track.leg + 1) % route.length],
-        distance = localDistanceMeters(a, b);
-      if (distance < 1) {
-        track.leg = (track.leg + 1) % route.length;
-        track.progress = 0;
-        continue;
-      }
-      const left = distance - track.progress,
-        move = Math.min(moveMeters, left);
-      track.progress += move;
-      moveMeters -= move;
-      if (track.progress >= distance - 0.01) {
-        track.leg = (track.leg + 1) % route.length;
-        track.progress = 0;
-      }
-    }
-    const a = route[track.leg % route.length],
-      b = route[(track.leg + 1) % route.length],
-      distance = localDistanceMeters(a, b) || 1,
-      t = Math.min(1, track.progress / distance),
-      lat = a[0] + (b[0] - a[0]) * t,
-      lng = a[1] + (b[1] - a[1]) * t;
-    processLocation(o, {
-      lat,
-      lng,
-      accuracy: 6 + (track.seed % 4),
-      speed,
-      timestamp: now(),
-      eventId: `sim-${sim.startedAt}-${o.id}-${track.sequence++}`,
-      source: 'simulation',
-    });
-    changed = true;
-  }
-  if (changed) {
-    sim.lastTick = now();
-    return true;
-  }
-  sim.active = false;
-  sim.stoppedAt = now();
-  return true;
-}
-
-async function clearDemoState(actor = 'Operator') {
-  const counts = unitSchemaReady
-      ? await cloudRequest('/rest/v1/rpc/dispatch_purge_simulated_locations', { method: 'POST', body: '{}' })
-      : {},
-    accounts = unitSchemaReady ? await cloudRequest('/rest/v1/dispatch_unit_accounts?select=officer_id') : [];
-  const assigned = new Set((accounts || []).map((account) => account.officer_id));
-  const fixtures = new Map([
-    ['officer-01', ['Amara Dlamini', 'Unit 12']],
-    ['officer-02', ['Lebo Mokoena', 'Unit 07']],
-    ['officer-03', ['Sibusiso Khumalo', 'Unit 23']],
-    ['officer-04', ['Naledi Nkosi', 'Unit 31']],
-  ]);
-  state.simulation = { active: false, startedAt: null, stoppedAt: now(), units: {} };
-  state.settings.liveMode = true;
-  state.officers = state.officers.filter((officer) => {
-    const fixture = fixtures.get(officer.id),
-      known = fixture && officer.name === fixture[0] && officer.callSign === fixture[1],
-      hasRecordedWork = Number(officer.historyCount || officer.history?.length || 0) > 0;
-    return !(known && !hasRecordedWork && !assigned.has(officer.id));
-  });
-  const sampleSiteIds = new Set(['site-sandton', 'site-m1', 'site-breach']);
-  state.sites = state.sites.filter(
-    (site) => !(sampleSiteIds.has(site.id) && !state.officers.some((officer) => officer.siteId === site.id)),
-  );
-  state.telemetry = [];
-  for (const officer of state.officers) delete officer.outputs;
-  state.messages = state.messages.filter(
-    (message) =>
-      message.id !== 'msg-001' && message.source !== 'simulation' && !String(message.id || '').startsWith('sim-'),
-  );
-  state.scheduledMessages = state.scheduledMessages.filter(
-    (message) => message.source !== 'simulation' && !String(message.id || '').startsWith('sim-'),
-  );
-  state.alerts = state.alerts.filter(
-    (alert) => alert.id !== 'alert-001' && alert.source !== 'simulation' && !String(alert.id || '').startsWith('sim-'),
-  );
-  state.audit = state.audit.filter(
-    (entry) =>
-      ![
-        'System initialized',
-        'Demo locations simulated',
-        'Route simulation started',
-        'Route simulation stopped',
-        'Simulated telemetry output changed',
-        'Terminal configuration applied locally',
-      ].includes(entry.action),
-  );
-  state.locationEventIds = (state.locationEventIds || []).filter((eventId) => !String(eventId).startsWith('sim-'));
-  pendingLocationRows.splice(
-    0,
-    pendingLocationRows.length,
-    ...pendingLocationRows.filter(
-      (row) => row.point.source !== 'simulation' && !String(row.point.eventId || '').startsWith('sim-'),
-    ),
-  );
-  for (const officer of state.officers) {
-    const summary = counts?.[officer.id];
-    if (summary) {
-      officer.historyCount = Number(summary.count || 0);
-      officer.latestHistoryAt = summary.latest || null;
-      officer.historyTail = (officer.historyTail || [])
-        .filter((point) => point.source !== 'simulation' && !String(point.eventId || '').startsWith('sim-'))
-        .slice(-10);
-    } else {
-      officer.history = (officer.history || []).filter(
-        (point) => point.source !== 'simulation' && !String(point.eventId || '').startsWith('sim-'),
-      );
-      officer.historyTail = officer.history.slice(-10);
-      officer.historyCount = officer.history.length;
-      officer.latestHistoryAt = officer.history.at(-1)?.receivedAt || null;
-    }
-  }
-  const usedGroups = new Set(state.officers.map((officer) => officer.group).filter(Boolean));
-  state.groups = (state.groups || []).filter((group) => usedGroups.has(group));
-  state.relays = (state.relays || []).filter(
-    (relay) => !(relay.id === 'relay-main' && relay.name === 'Johannesburg Control Node' && relay.host === '127.0.0.1'),
-  );
-  if (state.settings.company === 'Metro Traffic Operations') state.settings.company = '';
-  audit('Live mode enabled; fabricated seed and simulated state removed', 'Live system', actor);
-}
-
 function action(b) {
   const at = now(),
     o = state.officers.find((x) => x.id === b.officerId),
@@ -2318,18 +2099,6 @@ function action(b) {
       audit(o.tracking ? 'Tracking started' : 'Tracking stopped', o.callSign, actor);
       return {};
     }
-    case 'location': {
-      if (state.settings.liveMode) throw Error('Manually injected locations are disabled in live mode');
-      if (!o) throw Error('Choose an officer');
-      return processLocation(o, {
-        lat: b.lat,
-        lng: b.lng,
-        accuracy: b.accuracy,
-        speed: b.speed,
-        timestamp: b.timestamp || at,
-        eventId: b.eventId || id('loc'),
-      });
-    }
     case 'call-start': {
       const caller = state.officers.find((x) => x.callSign === b.from);
       if (caller && (!caller.shiftId || caller.stunned))
@@ -2420,17 +2189,6 @@ function action(b) {
       audit('Group removed', b.name, actor);
       return {};
     }
-    case 'config-save': {
-      if (state.settings.liveMode) throw Error('Terminal configuration simulation is disabled in live mode');
-      if (!o) throw Error('Choose a terminal');
-      o.config = { ...o.config, ...b.config };
-      if (b.config?.alias) o.callSign = b.config.alias;
-      if (b.config?.defaultGroup) o.group = b.config.defaultGroup;
-      o.configUpdatedAt = at;
-      o.configAck = 'local-simulated';
-      audit('Terminal configuration applied locally', o.callSign, actor);
-      return {};
-    }
     case 'region-save': {
       const r = {
         id: b.id || id('region'),
@@ -2482,22 +2240,11 @@ function action(b) {
       audit('Audio patch removed', b.id, actor);
       return {};
     }
-    case 'telemetry': {
-      if (state.settings.liveMode) throw Error('Simulated telemetry outputs are disabled in live mode');
-      if (!o) throw Error('Choose a terminal');
-      const t = { id: id('tel'), officerId: o.id, point: b.point || 'Auxiliary output 1', value: b.value ?? true, at };
-      state.telemetry.unshift(t);
-      o.outputs ||= {};
-      o.outputs[t.point] = t.value;
-      audit('Simulated telemetry output changed', `${o.callSign} · ${t.point} · ${t.value ? 'ON' : 'OFF'}`, actor);
-      return { output: t };
-    }
     case 'settings': {
       const incoming = { ...(b.settings || {}) };
       if (!String(incoming.trafficKey || '').trim()) delete incoming.trafficKey;
       Object.assign(state.settings, incoming);
       state.settings.backupFrequency = 'hourly';
-      state.settings.liveMode = true;
       delete state.settings.mapTileUrl;
       if (Object.hasOwn(b.settings || {}, 'mapProvider')) {
         state.settings.mapProvider = ['Esri World Street Map', 'OpenStreetMap'].includes(b.settings.mapProvider)
@@ -2523,58 +2270,6 @@ function action(b) {
       }
       audit('Batch import', `${added} officers`);
       return { added };
-    }
-    case 'simulation-start': {
-      if (state.settings.liveMode)
-        throw Error('Live mode is on. Disable it only in an explicitly configured demo environment.');
-      if (state.simulation?.active) return { started: false, active: true };
-      const units = state.officers.filter((x) => x.shiftId && x.tracking && !x.stunned);
-      if (!units.length) throw Error('Clock in at least one active unit before starting the route simulation');
-      const tracks = {};
-      units.forEach((person, index) => {
-        const route = makeSimulationRoute(person, index);
-        if (route.length > 1) tracks[person.id] = { route, leg: 0, progress: 0, sequence: 0, seed: index + 1 };
-      });
-      if (!Object.keys(tracks).length) throw Error('No work site is available for the route simulation');
-      state.simulation = { active: true, startedAt: at, stoppedAt: null, lastTick: null, units: tracks };
-      audit('Route simulation started', `${units.length} active units`, actor);
-      return { started: true, units: units.length };
-    }
-    case 'simulation-stop': {
-      const wasActive = Boolean(state.simulation?.active);
-      state.simulation = { ...(state.simulation || {}), active: false, stoppedAt: at };
-      audit('Route simulation stopped', 'Active units', actor);
-      return { stopped: wasActive };
-    }
-    case 'simulate': {
-      if (state.settings.liveMode) throw Error('Live mode is on; fabricated location actions are disabled');
-      const points = [
-        [-26.1034, 28.0529],
-        [-26.1012, 28.0581],
-        [-26.0992, 28.0653],
-        [-26.112, 28.05],
-        [-26.0969, 28.0674],
-      ];
-      let i = 0;
-      for (const person of state.officers.filter((x) => x.shiftId && !x.stunned)) {
-        const p = points[((Date.now() / 3000) | (0 + i++)) % points.length];
-        processLocation(person, {
-          lat: p[0] + (Math.random() - 0.5) * 0.002,
-          lng: p[1] + (Math.random() - 0.5) * 0.002,
-          accuracy: 8 + Math.random() * 10,
-          speed: 4 + Math.random() * 35,
-          timestamp: at,
-          eventId: id('sim'),
-          source: 'simulation',
-        });
-      }
-      audit('Demo locations simulated', 'Active units', actor);
-      return {};
-    }
-    case 'live-mode': {
-      state.settings.liveMode = true;
-      state.simulation = { ...(state.simulation || {}), active: false, stoppedAt: at, units: {} };
-      return { liveMode: true };
     }
     case 'backup':
       return makeBackup();
@@ -2701,19 +2396,6 @@ function exportRows(type) {
     battery: o.battery,
     stunned: o.stunned,
   }));
-}
-function toCsv(rows) {
-  if (!rows.length) return '';
-  const keys = [...new Set(rows.flatMap((x) => Object.keys(x)))];
-  return [
-    keys.map(csvCell).join(','),
-    ...rows.map((r) => keys.map((k) => csvCell(Array.isArray(r[k]) ? r[k].join('|') : r[k])).join(',')),
-  ].join('\r\n');
-}
-function csvCell(v) {
-  let s = String(v ?? '');
-  if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
-  return `"${s.replaceAll('"', '""')}"`;
 }
 function readBody(req) {
   return new Promise((resolve, reject) => {
@@ -3190,7 +2872,6 @@ let autoBackupInProgress = false,
 async function runMaintenance() {
   let dirty = false;
   const ms = Date.now();
-  if (tickSimulation()) dirty = true;
   for (const o of state.officers) {
     if (o.online && o.lastSeen && ms - Date.parse(o.lastSeen) > Number(state.settings.offlineMinutes || 5) * 60000) {
       o.online = false;
@@ -3261,7 +2942,7 @@ async function runMaintenance() {
       dirty = true;
     }
   }
-  for (const key of ['messages', 'calls', 'recordings', 'alerts', 'traffic', 'telemetry', 'emails'])
+  for (const key of ['messages', 'calls', 'recordings', 'alerts', 'traffic', 'emails'])
     if (Array.isArray(state[key])) {
       const before = state[key].length;
       state[key] = state[key].filter(

@@ -76,6 +76,16 @@ test('server boot and unauthenticated API contract', async t => {
   assert.equal(authStatus.configured, false);
   assert.equal(authStatus.ready, false);
 
+  // Unauthenticated writes are refused. Without Supabase the refusal is 503, with it a 401.
+  const unauthorisedAction = await fetch(`${baseUrl}/api/action`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ type: 'sos' }),
+  });
+  assert.ok([401, 503].includes(unauthorisedAction.status), `got ${unauthorisedAction.status}`);
+  const actionBody = await unauthorisedAction.json();
+  assert.equal(actionBody.ok, undefined);
+
   const state = await fetch(`${baseUrl}/api/state`);
   assert.equal(state.status, 503);
   assert.match((await state.json()).error, /Supabase server configuration is required/i);

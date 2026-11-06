@@ -239,18 +239,12 @@ function say(t) {
       'call-start': 'Dispatch channel opened',
       'call-end': 'Call ended',
       settings: 'Settings saved',
-      'live-mode': 'Live state enabled; demo data removed',
       backup: 'Backup created',
-      simulate: 'Route simulation started',
-      'simulation-stop': 'Route simulation stopped',
-      'simulation-start': 'Route simulation started',
       break: 'Break status updated',
       'status-query': 'Terminal status received',
       'region-save': 'Region saved',
       'region-delete': 'Region removed',
-      telemetry: 'Control command recorded',
       'group-save': 'Group created',
-      'config-save': 'Terminal configuration applied',
       email: 'Email queued locally',
     }[t] || 'Saved',
   );
@@ -279,7 +273,7 @@ function title(page) {
       messages: 'Messages',
       calls: 'Voice dispatch',
       recordings: 'Recordings',
-      network: 'Network & telemetry',
+      network: 'Network & devices',
       review: 'Day review',
       reports: 'Reports & exports',
       settings: 'System settings',
@@ -321,8 +315,6 @@ function pageDataSignature(page) {
   switch (page) {
     case 'overview':
       return JSON.stringify([
-        S.settings.liveMode,
-        S.simulation?.active,
         S.officers.map(officerLive),
         S.sites.map((x) => [x.id, x.name, x.areaType, x.coordinates, x.color]),
         S.regions.map((x) => [x.id, x.name, x.areaType, x.coordinates, x.color]),
@@ -391,7 +383,6 @@ function pageDataSignature(page) {
       return JSON.stringify([
         S.officers.map(officerLive),
         S.relays,
-        S.telemetry.map((x) => [x.id, x.officerId, x.point, x.value, x.at]),
       ]);
     case 'reports': {
       const type = $('#reportType')?.value || 'officers',
@@ -473,7 +464,6 @@ function render(rebuildPage = false) {
   } else if (rebuildPage) renderPage();
   else refreshVisiblePage();
   syncTrafficButton();
-  syncSimulationControl();
   updateTrafficSummary();
   checkSOS();
 }
@@ -566,7 +556,7 @@ function go(page) {
   rtcHeartbeat();
 }
 function overviewHtml() {
-  return `<section class="map-panel panel dashboard-map"><div class="panel-heading map-heading"><div><div class="panel-title">Live operations map <span class="live-pill small"><i></i> LIVE</span></div><div class="panel-subtitle">Live unit locations · <span id="mapTime">Updated just now</span><span class="map-summary-sep">·</span><span id="mapUnitSummary">Loading units</span></div></div><div class="map-tools"><div class="map-mode-segment" aria-label="Map perspective"><button class="mode-button active" id="map2dBtn" data-action="map-2d">2D</button><button class="mode-button" id="map3dBtn" data-action="map-3d">Pitched 3D</button></div><button class="button small primary" id="liveModeBtn" data-action="live-mode" aria-pressed="true" title="Enable live-only mode and remove known demo records">● <span>LIVE MODE ON</span></button><button class="button small ghost" data-action="traffic"><span class="toggle-dot"></span> Traffic</button><details class="map-tools-more"><summary class="button small ghost">More <span aria-hidden="true">⌄</span></summary><div class="map-tools-menu"><div class="map-menu-label">MAP</div><select class="select map-style" id="mapStyleSelect" aria-label="Map style"><option value="street">Street map</option><option value="satellite">Satellite</option><option value="topo">Terrain</option></select><button class="button small ghost map-fit" data-action="fit">⌖ <span>Fit units</span></button><div class="map-menu-label">TOOLS</div><button class="button small ghost" data-action="simulate" ${S.settings.liveMode ? 'hidden' : ''}>⟳ <span>${S.simulation?.active ? 'Stop route simulation' : 'Start route simulation'}</span></button><button class="button small ghost" data-action="locate-me">◎ <span>Locate me</span></button><button class="button small ghost" data-action="measure">↔ <span>Measure distance</span></button><button class="button small ghost" data-action="fullscreen">⛶ <span>Full screen</span></button><button class="button small ghost" data-action="draw-site">＋ <span>Draw a site</span></button></div></details></div></div><div class="map-wrap"><div id="map"></div><div id="map3d" class="hidden"></div><div class="map-zoom-controls" role="group" aria-label="Map zoom controls"><button type="button" data-action="zoom-in" aria-label="Zoom in" title="Zoom in">+</button><button type="button" data-action="zoom-out" aria-label="Zoom out" title="Zoom out">−</button></div><div id="mapCoordinates" class="map-coordinates">LAT — · LNG —</div><div id="measurePanel" class="measure-panel hidden" aria-live="polite"></div><details class="map-info-drawer" id="mapInfoDrawer"><summary><span>Map key & traffic</span><b>＋</b></summary><div class="map-info-content"><div id="trafficSummary" class="traffic-summary"></div><div class="map-legend"><div><span class="legend-dot green"></span> On site <span class="legend-dot amber"></span> En route <span class="legend-dot grey"></span> Off duty</div><div class="traffic-legend"><span class="road green-road"></span> Free flow <span class="road orange-road"></span> Slow <span class="road red-road"></span> Heavy</div></div><div id="trafficNotice" class="map-notice">Traffic key required · configure in Settings</div></div></details><div class="draw-hint hidden" id="drawHint">Click map to add points <button data-action="finish-draw">Finish</button><button data-action="cancel-draw">Cancel</button></div><div id="mapUnitCard" class="map-unit-card hidden"></div><details class="map-fleet-dock" id="mapFleetDock"><summary><span class="fleet-dock-pulse"></span><b>Active units</b><span id="fleetDockCount" class="tag green">0</span><span class="fleet-dock-hint">Quick locate</span><span class="fleet-dock-chevron">⌃</span></summary><div id="fleetDockList" class="fleet-dock-list"></div></details></div></section><section class="dashboard-foldouts" aria-label="Additional live operations"><details class="dashboard-foldout"><summary><span class="foldout-name">Needs attention</span><span id="alertCount" class="count-badge">0</span><span class="foldout-hint" id="alertSummary">No unresolved alerts</span><span class="foldout-chevron">＋</span></summary><div class="foldout-body"><div id="alertList" class="alert-list"></div><div class="panel-footer"><span class="foot-indicator"></span> SOS alarms always break through filters <button class="text-button" data-page-link="reports">View alert log</button></div></div></details><details class="dashboard-foldout"><summary><span class="foldout-name">Units on the ground</span><span id="unitCount" class="count-badge pale">0 active</span><span class="foldout-hint">Select a unit to locate it</span><span class="foldout-chevron">＋</span></summary><div class="foldout-body"><div id="unitList" class="unit-list"></div><button class="panel-link" data-page-link="units">View all officers <span>→</span></button></div></details></section>`;
+  return `<section class="map-panel panel dashboard-map"><div class="panel-heading map-heading"><div><div class="panel-title">Live operations map <span class="live-pill small"><i></i> LIVE</span></div><div class="panel-subtitle">Live unit locations · <span id="mapTime">Updated just now</span><span class="map-summary-sep">·</span><span id="mapUnitSummary">Loading units</span></div></div><div class="map-tools"><div class="map-mode-segment" aria-label="Map perspective"><button class="mode-button active" id="map2dBtn" data-action="map-2d">2D</button><button class="mode-button" id="map3dBtn" data-action="map-3d">Pitched 3D</button></div><button class="button small ghost" data-action="traffic"><span class="toggle-dot"></span> Traffic</button><details class="map-tools-more"><summary class="button small ghost">More <span aria-hidden="true">⌄</span></summary><div class="map-tools-menu"><div class="map-menu-label">MAP</div><select class="select map-style" id="mapStyleSelect" aria-label="Map style"><option value="street">Street map</option><option value="satellite">Satellite</option><option value="topo">Terrain</option></select><button class="button small ghost map-fit" data-action="fit">⌖ <span>Fit units</span></button><div class="map-menu-label">TOOLS</div><button class="button small ghost" data-action="locate-me">◎ <span>Locate me</span></button><button class="button small ghost" data-action="measure">↔ <span>Measure distance</span></button><button class="button small ghost" data-action="fullscreen">⛶ <span>Full screen</span></button><button class="button small ghost" data-action="draw-site">＋ <span>Draw a site</span></button></div></details></div></div><div class="map-wrap"><div id="map"></div><div id="map3d" class="hidden"></div><div class="map-zoom-controls" role="group" aria-label="Map zoom controls"><button type="button" data-action="zoom-in" aria-label="Zoom in" title="Zoom in">+</button><button type="button" data-action="zoom-out" aria-label="Zoom out" title="Zoom out">−</button></div><div id="mapCoordinates" class="map-coordinates">LAT — · LNG —</div><div id="measurePanel" class="measure-panel hidden" aria-live="polite"></div><details class="map-info-drawer" id="mapInfoDrawer"><summary><span>Map key & traffic</span><b>＋</b></summary><div class="map-info-content"><div id="trafficSummary" class="traffic-summary"></div><div class="map-legend"><div><span class="legend-dot green"></span> On site <span class="legend-dot amber"></span> En route <span class="legend-dot grey"></span> Off duty</div><div class="traffic-legend"><span class="road green-road"></span> Free flow <span class="road orange-road"></span> Slow <span class="road red-road"></span> Heavy</div></div><div id="trafficNotice" class="map-notice">Traffic key required · configure in Settings</div></div></details><div class="draw-hint hidden" id="drawHint">Click map to add points <button data-action="finish-draw">Finish</button><button data-action="cancel-draw">Cancel</button></div><div id="mapUnitCard" class="map-unit-card hidden"></div><details class="map-fleet-dock" id="mapFleetDock"><summary><span class="fleet-dock-pulse"></span><b>Active units</b><span id="fleetDockCount" class="tag green">0</span><span class="fleet-dock-hint">Quick locate</span><span class="fleet-dock-chevron">⌃</span></summary><div id="fleetDockList" class="fleet-dock-list"></div></details></div></section><section class="dashboard-foldouts" aria-label="Additional live operations"><details class="dashboard-foldout"><summary><span class="foldout-name">Needs attention</span><span id="alertCount" class="count-badge">0</span><span class="foldout-hint" id="alertSummary">No unresolved alerts</span><span class="foldout-chevron">＋</span></summary><div class="foldout-body"><div id="alertList" class="alert-list"></div><div class="panel-footer"><span class="foot-indicator"></span> SOS alarms always break through filters <button class="text-button" data-page-link="reports">View alert log</button></div></div></details><details class="dashboard-foldout"><summary><span class="foldout-name">Units on the ground</span><span id="unitCount" class="count-badge pale">0 active</span><span class="foldout-hint">Select a unit to locate it</span><span class="foldout-chevron">＋</span></summary><div class="foldout-body"><div id="unitList" class="unit-list"></div><button class="panel-link" data-page-link="units">View all officers <span>→</span></button></div></details></section>`;
 }
 function mapUnitColor(o) {
   return !o.shiftId
@@ -1385,16 +1375,16 @@ function renderRecordings() {
 function networkHtml() {
   return (
     header(
-      'Network & telemetry',
-      'Terminal status, gateways, relays, telemetry and device controls.',
+      'Network & devices',
+      'Terminal status, relays and device controls.',
       '＋ Add relay node',
       'add-relay',
     ) +
-    `<div class="workspace-grid"><div class="content-card workspace-full"><div class="panel-heading"><div><div class="panel-title">Terminal health</div><div class="panel-subtitle">Battery, signal, connectivity and remote controls</div></div><button class="button ghost small" data-action="status-query">↻ Query all</button></div><div id="telemetryTable"></div></div><details class="workspace-disclosure"><summary><span><b>Relay configuration</b><small>Locally configured · no physical link probe</small></span><span class="disclosure-action">Show</span></summary><div class="workspace-disclosure-body"><div id="relayList" class="detail-list"></div></div></details><details class="workspace-disclosure"><summary><span><b>Terminal actions</b><small>Remote commands and unit controls</small></span><span class="disclosure-action">Show</span></summary><div class="workspace-disclosure-body"><div id="terminalActions" class="detail-list"></div></div></details><details class="workspace-disclosure workspace-full"><summary><span><b>Telemetry event log</b><small>Real device data only · simulated outputs disabled in live mode</small></span><span class="disclosure-action">Show</span></summary><div class="workspace-disclosure-body"><button class="button ghost small" data-action="telemetry" ${S.settings.liveMode ? 'hidden' : ''}>＋ Toggle output</button><div id="telemetryLog"></div></div></details></div>`
+    `<div class="workspace-grid"><div class="content-card workspace-full"><div class="panel-heading"><div><div class="panel-title">Terminal health</div><div class="panel-subtitle">Battery, signal, connectivity and remote controls</div></div><button class="button ghost small" data-action="status-query">↻ Query all</button></div><div id="deviceTable"></div></div><details class="workspace-disclosure"><summary><span><b>Relay configuration</b><small>Locally configured · no physical link probe</small></span><span class="disclosure-action">Show</span></summary><div class="workspace-disclosure-body"><div id="relayList" class="detail-list"></div></div></details><details class="workspace-disclosure"><summary><span><b>Terminal actions</b><small>Remote commands and unit controls</small></span><span class="disclosure-action">Show</span></summary><div class="workspace-disclosure-body"><div id="terminalActions" class="detail-list"></div></div></details></div>`
   );
 }
 function renderNetwork() {
-  $('#telemetryTable').innerHTML =
+  $('#deviceTable').innerHTML =
     `<div class="table-wrap"><table class="data-table"><thead><tr><th>Unit</th><th>Battery</th><th>Signal</th><th>Connectivity</th><th>GPS</th><th>Status</th><th></th></tr></thead><tbody>${S.officers.map((o) => `<tr><td><b>${esc(o.callSign)}</b> · ${esc(o.name)}</td><td>${batteryLabel(o.battery)}</td><td>${'▮'.repeat(Math.max(0, o.signal || 0))}${'▯'.repeat(5 - Math.max(0, o.signal || 0))}</td><td><span class="tag ${o.online ? '' : 'red'}">${o.online ? 'Online' : 'Offline'}</span></td><td>±${o.accuracy || '—'} m</td><td>${esc(status(o))}</td><td><button class="mini-action" data-action="status-one" data-id="${o.id}">Query</button></td></tr>`).join('')}</tbody></table></div>`;
   $('#relayList').innerHTML =
     S.relays
@@ -1406,18 +1396,9 @@ function renderNetwork() {
   $('#terminalActions').innerHTML = S.officers
     .map(
       (o) =>
-        `<div class="detail-row"><span>${esc(o.callSign)} · ${esc(o.name)}</span><b>${S.settings.liveMode ? '' : `<button class="mini-action" data-action="otap" data-id="${o.id}">OTAP</button> `}<button class="mini-action" data-action="stun" data-id="${o.id}">${o.stunned ? 'Activate' : 'Stun'}</button></b></div>`,
+        `<div class="detail-row"><span>${esc(o.callSign)} · ${esc(o.name)}</span><b><button class="mini-action" data-action="stun" data-id="${o.id}">${o.stunned ? 'Activate' : 'Stun'}</button></b></div>`,
     )
     .join('');
-  $('#telemetryLog').innerHTML = S.telemetry.length
-    ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>Terminal</th><th>Control point</th><th>Value</th><th>Recorded</th></tr></thead><tbody>${S.telemetry
-        .slice(0, 40)
-        .map(
-          (t) =>
-            `<tr><td>${esc(officer(t.officerId)?.callSign)}</td><td>${esc(t.point)}</td><td>${esc(t.value)}</td><td>${fmt(t.at)}</td></tr>`,
-        )
-        .join('')}</tbody></table></div>`
-    : '<div class="empty-state">No telemetry events</div>';
 }
 function latestReviewDate() {
   const dates = [
@@ -3206,18 +3187,6 @@ function syncTrafficButton() {
     b.title = trafficOn ? 'TomTom live traffic is on' : 'Turn on TomTom live traffic';
   });
 }
-function syncSimulationControl() {
-  const b = $('#pageContent [data-action="simulate"]'),
-    span = b?.querySelector('span');
-  if (span) span.textContent = S?.simulation?.active ? 'Stop route simulation' : 'Start route simulation';
-  if (b) b.hidden = Boolean(S?.settings?.liveMode);
-  b?.classList.toggle('danger', Boolean(S?.simulation?.active));
-  const live = $('#liveModeBtn');
-  if (live) {
-    live.setAttribute('aria-pressed', String(Boolean(S?.settings?.liveMode)));
-    live.querySelector('span').textContent = S?.settings?.liveMode ? 'LIVE MODE ON' : 'GO LIVE';
-  }
-}
 function syncMapLibreTrafficLayer() {
   if (!mapLibre || !mapLibreReady) return;
   const wanted = trafficOn && trafficConfigured(S.settings) && S.settings.trafficProvider !== 'here',
@@ -3401,14 +3370,6 @@ async function doAction(a, id = '', el = null) {
     case 'add-officer':
       officerForm();
       break;
-    case 'live-mode':
-      if (
-        confirm(
-          'Enable live-only mode? This stops simulated movement and removes the built-in demo roster, sample alert/message, and simulated GPS points. Real unit data and real GPS history are kept.',
-        )
-      )
-        await action('live-mode');
-      break;
     case 'delete-unit-login':
       if (
         confirm(
@@ -3562,9 +3523,6 @@ async function doAction(a, id = '', el = null) {
     case 'view-sos':
       focusSosAlert(id);
       break;
-    case 'simulate':
-      await action(S.simulation?.active ? 'simulation-stop' : 'simulation-start');
-      break;
     case 'start-call':
       callForm();
       break;
@@ -3658,32 +3616,6 @@ async function doAction(a, id = '', el = null) {
     }
     case 'stun':
       await action('stun', { officerId: id, stunned: !o.stunned });
-      break;
-    case 'otap':
-      openModal(
-        `OTAP · ${esc(o.callSign)}`,
-        `<div class="form-grid">${fld('Terminal ID', 'terminalId', o.id)}${fld('Alias', 'alias', o.callSign)}<div class="form-field"><label>Default group</label><select class="select" name="defaultGroup">${groupOpts(o.group)}</select></div>${fld('Location interval (sec)', 'locationInterval', o.config?.locationInterval || 15, 'number')}${fld('DMR colour code', 'colorCode', o.config?.colorCode || '1')}${fld('DMR time slot', 'timeSlot', o.config?.timeSlot || '1')}${fld('Radio frequency', 'frequency', o.config?.frequency || '')}</div><p class="form-help">Configuration is applied to this local terminal simulation and affects its group and location interval. No physical radio is programmed.</p>`,
-        'Apply config',
-        async (fd) => {
-          await action('config-save', { officerId: id, config: Object.fromEntries(fd) });
-          $('#modalRoot').innerHTML = '';
-        },
-      );
-      break;
-    case 'telemetry':
-      openModal(
-        'Remote telemetry control',
-        `<div class="form-grid"><div class="form-field"><label>Terminal</label><select class="select" name="officerId">${officerOpts()}</select></div><div class="form-field"><label>Control point</label><select class="select" name="point"><option>Auxiliary output 1</option><option>Beacon</option><option>External siren</option></select></div><div class="form-field"><label>Value</label><select class="select" name="value"><option value="true">Turn on</option><option value="false">Turn off</option></select></div></div><p class="form-help">Simulated output only; no external hardware connected.</p>`,
-        'Send command',
-        async (fd) => {
-          await action('telemetry', {
-            officerId: fd.get('officerId'),
-            point: fd.get('point'),
-            value: fd.get('value') === 'true',
-          });
-          $('#modalRoot').innerHTML = '';
-        },
-      );
       break;
     case 'backup':
       await api('/api/backup', { method: 'POST', body: '{}' });
