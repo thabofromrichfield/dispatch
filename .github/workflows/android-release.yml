@@ -1,0 +1,58 @@
+name: Publish Android Field APK
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'android/**'
+      - 'scripts/sync-android-assets.sh'
+      - '.github/workflows/android-release.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Install Android platform and build tools
+        shell: bash
+        run: |
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" -type f -name sdkmanager 2>/dev/null | sort | tail -n 1)"
+          if [ -z "$SDKMANAGER" ]; then echo "Android sdkmanager not found under $SDK_ROOT" >&2; exit 1; fi
+          echo "$(dirname "$SDKMANAGER")" >> "$GITHUB_PATH"
+          echo "$SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Build installable APK
+        run: ./android/gradlew --no-daemon -p android assembleDebug
+
+      - name: Publish APK as the latest GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          VERSION_NAME="$(sed -n "s/.*versionName '\([^']*\)'.*/\1/p" android/app/build.gradle | head -n 1)"
+          if [ -z "$VERSION_NAME" ]; then echo "Could not read Android versionName" >&2; exit 1; fi
+          TAG="android-v${VERSION_NAME}-build${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}"
+          APK="android/app/build/outputs/apk/debug/app-debug.apk"
+          gh release create "$TAG" "$APK#Dispatch-Field.apk" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "Dispatch Field Android ${VERSION_NAME}" \
+            --notes "Installable Android field app. Built from commit ${GITHUB_SHA}. Download Dispatch-Field.apk below." \
+            --latest
