@@ -11,25 +11,22 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.view.Gravity;
-import android.view.View;
 import android.view.ViewGroup;
 import android.webkit.JavascriptInterface;
 import android.webkit.CookieManager;
 import android.webkit.PermissionRequest;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
+import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
-import android.webkit.GeolocationPermissions;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
 
-import androidx.webkit.ServiceWorkerClientCompat;
-import androidx.webkit.ServiceWorkerControllerCompat;
 import androidx.webkit.WebViewAssetLoader;
 
 import org.json.JSONException;
@@ -42,22 +39,24 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.Iterator;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public class MainActivity extends Activity {
     private static final String PREFS = "dispatch-field";
     private static final String KEY_SERVER = "serverBase";
+    private static final String DEFAULT_SERVER = "https://dispatch-brown-five.vercel.app";
     private static final String PREF_LOCATION_DENIED = "locationPermissionDenied";
     private static final String ASSET_ORIGIN = "https://appassets.androidplatform.net";
     private static final int REQUEST_LOCATION = 4101;
     private static final int REQUEST_MICROPHONE = 4102;
 
     private SharedPreferences preferences;
-    private String serverBase = "";
+    private volatile String serverBase = "";
     private LinearLayout root;
-    private WebView webView;
+    private volatile WebView webView;
+    private final ExecutorService apiExecutor = Executors.newFixedThreadPool(3);
     private PermissionRequest pendingMediaRequest;
-    private GeolocationPermissions.Callback pendingGeoCallback;
-    private String pendingGeoOrigin;
     private String pendingOfficerId;
     private int pendingInterval = 15;
     private boolean locationPermissionRequestActive;
@@ -70,7 +69,11 @@ public class MainActivity extends Activity {
         getWindow().setNavigationBarColor(Color.rgb(8, 17, 30));
         preferences = getSharedPreferences(PREFS, MODE_PRIVATE);
         locationPermissionDenied = preferences.getBoolean(PREF_LOCATION_DENIED, false) && !hasFineLocation();
-        serverBase = preferences.getString(KEY_SERVER, "");
+        serverBase = preferences.getString(KEY_SERVER, DEFAULT_SERVER);
+        if (serverBase == null || serverBase.trim().isEmpty()) {
+            serverBase = DEFAULT_SERVER;
+            preferences.edit().putString(KEY_SERVER, serverBase).apply();
+        }
         if (validServer(serverBase)) showApp(); else showConnectScreen();
     }
 
@@ -105,7 +108,7 @@ public class MainActivity extends Activity {
         urlInput.setSingleLine(true);
         urlInput.setTextColor(Color.WHITE);
         urlInput.setHintTextColor(Color.rgb(133, 151, 172));
-        urlInput.setHint("https://dispatch.example.com");
+        urlInput.setHint(DEFAULT_SERVER);
         urlInput.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_VARIATION_URI);
         urlInput.setText(serverBase);
         urlInput.setSelectAllOnFocus(true);
@@ -148,27 +151,12 @@ public class MainActivity extends Activity {
         root.setOrientation(LinearLayout.VERTICAL);
         root.setBackgroundColor(Color.rgb(8, 17, 30));
 
-        LinearLayout top = new LinearLayout(this);
-        top.setGravity(Gravity.CENTER_VERTICAL);
-        top.setPadding(dp(12), dp(4), dp(8), dp(4));
-        top.setBackgroundColor(Color.rgb(12, 24, 40));
-        TextView label = new TextView(this);
-        label.setText("DISPATCH FIELD");
-        label.setTextColor(Color.WHITE);
-        label.setTextSize(13);
-        label.setTypeface(null, android.graphics.Typeface.BOLD);
-        top.addView(label, new LinearLayout.LayoutParams(0, dp(42), 1));
-        Button serverButton = button("Server", false);
-        top.addView(serverButton, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(40)));
-        serverButton.setOnClickListener(v -> showConnectScreen());
-        root.addView(top, matchWidthWrap());
-
         webView = new WebView(this);
         WebSettings settings = webView.getSettings();
         settings.setJavaScriptEnabled(true);
         settings.setDomStorageEnabled(true);
-        settings.setDatabaseEnabled(true);
-        settings.setGeolocationEnabled(true);
+        settings.setDatabaseEnabled(false);
+        settings.setGeolocationEnabled(false);
         settings.setAllowFileAccess(false);
         settings.setAllowContentAccess(false);
         settings.setMediaPlaybackRequiresUserGesture(false);
@@ -182,7 +170,7 @@ public class MainActivity extends Activity {
         webView.addJavascriptInterface(new DispatchBridge(this), "DispatchNative");
         webView.setWebViewClient(new WebViewClient() {
             @Override
-            public android.webkit.WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
+            public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
                 return assetLoader.shouldInterceptRequest(request.getUrl());
             }
 
@@ -192,36 +180,18 @@ public class MainActivity extends Activity {
                 return !"appassets.androidplatform.net".equals(uri.getHost());
             }
         });
-        ServiceWorkerControllerCompat.getInstance().setServiceWorkerClient(new ServiceWorkerClientCompat() {
-            @Override
-            public android.webkit.WebResourceResponse shouldInterceptRequest(WebResourceRequest request) {
-                return assetLoader.shouldInterceptRequest(request.getUrl());
-            }
-        });
         webView.setWebChromeClient(new WebChromeClient() {
             @Override
             public void onPermissionRequest(PermissionRequest request) {
                 runOnUiThread(() -> handleWebPermission(request));
             }
 
-            @Override
-            public void onGeolocationPermissionsShowPrompt(String origin, GeolocationPermissions.Callback callback) {
-                runOnUiThread(() -> {
-                    if (hasFineLocation()) callback.invoke(origin, true, false);
-                    else if (locationPermissionDenied) callback.invoke(origin, false, false);
-                    else {
-                        pendingGeoOrigin = origin;
-                        pendingGeoCallback = callback;
-                        requestLocationPermission();
-                    }
-                });
-            }
         });
 
 
-        root.addView(webView, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
+        root.addView(webView, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         setContentView(root);
-        webView.loadUrl(ASSET_ORIGIN + "/index.html?view=field");
+        webView.loadUrl(ASSET_ORIGIN + "/index.html");
     }
 
     private void handleWebPermission(PermissionRequest request) {
@@ -262,11 +232,6 @@ public class MainActivity extends Activity {
     }
 
     private void completeLocationPermission(boolean granted) {
-        if (pendingGeoCallback != null) {
-            pendingGeoCallback.invoke(pendingGeoOrigin, granted, false);
-            pendingGeoCallback = null;
-            pendingGeoOrigin = null;
-        }
         if (pendingOfficerId != null) {
             if (granted) startLocationService(pendingOfficerId, pendingInterval);
             else Toast.makeText(this, "Precise location permission is required for background tracking", Toast.LENGTH_LONG).show();
@@ -320,6 +285,7 @@ public class MainActivity extends Activity {
             webView.destroy();
             webView = null;
         }
+        apiExecutor.shutdownNow();
         super.onDestroy();
     }
 
@@ -358,6 +324,24 @@ public class MainActivity extends Activity {
         DispatchBridge(Context context) { this.context = context; }
 
         @JavascriptInterface
+        public void openServerSettings() {
+            MainActivity.this.runOnUiThread(MainActivity.this::showConnectScreen);
+        }
+
+        @JavascriptInterface
+        public void requestAsync(String path, String method, String headersJson, String body, String callbackId) {
+            if (callbackId == null || !callbackId.matches("[A-Za-z0-9_-]{1,100}")) return;
+            apiExecutor.execute(() -> {
+                String response = request(path, method, headersJson, body);
+                WebView target = webView;
+                if (target == null) return;
+                String script = "window.DispatchNativeResolve && window.DispatchNativeResolve("
+                        + JSONObject.quote(callbackId) + "," + JSONObject.quote(response) + ");";
+                target.post(() -> target.evaluateJavascript(script, null));
+            });
+        }
+
+        @JavascriptInterface
         public String request(String path, String method, String headersJson, String body) {
             JSONObject result = new JSONObject();
             HttpURLConnection connection = null;
@@ -371,8 +355,8 @@ public class MainActivity extends Activity {
                 connection.setRequestMethod(verb);
                 String cookieHeader = CookieManager.getInstance().getCookie(serverBase);
                 if (cookieHeader != null && !cookieHeader.isEmpty()) connection.setRequestProperty("Cookie", cookieHeader);
-                connection.setConnectTimeout(8000);
-                connection.setReadTimeout(20000);
+                connection.setConnectTimeout(15000);
+                connection.setReadTimeout(45000);
                 connection.setRequestProperty("X-Dispatch-Client", "android-field");
                 JSONObject requestHeaders = new JSONObject(headersJson == null ? "{}" : headersJson);
                 Iterator<String> names = requestHeaders.keys();
@@ -394,13 +378,12 @@ public class MainActivity extends Activity {
                 }
                 CookieManager.getInstance().flush();
                 InputStream stream = status >= 400 ? connection.getErrorStream() : connection.getInputStream();
-                String responseBody = stream == null ? "" : readUtf8(stream);
-                result.put("status", status);
-                result.put("body", responseBody);
-                JSONObject responseHeaders = new JSONObject();
                 String contentType = connection.getContentType();
+                result.put("status", status);
+                result.put("body", stream == null ? "" : readUtf8(stream));
+                JSONObject responseHeaders = new JSONObject();
                 if (contentType != null) responseHeaders.put("Content-Type", contentType);
-                responseHeaders.put("Cache-Control", "no-store");
+                responseHeaders.put("Cache-Control", connection.getHeaderField("Cache-Control") == null ? "no-store" : connection.getHeaderField("Cache-Control"));
                 result.put("headers", responseHeaders);
             } catch (Exception error) {
                 try {

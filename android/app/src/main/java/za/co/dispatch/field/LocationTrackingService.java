@@ -14,6 +14,7 @@ import android.location.Location;
 import android.location.LocationListener;
 import android.location.LocationManager;
 import android.os.Build;
+import android.os.BatteryManager;
 import android.os.IBinder;
 import android.os.Looper;
 import android.webkit.CookieManager;
@@ -124,8 +125,15 @@ public final class LocationTrackingService extends Service implements LocationLi
             point.put("timestamp", Instant.ofEpochMilli(location.getTime()).toString());
             point.put("eventId", officerId + "-android-" + location.getTime());
             point.put("speed", location.hasSpeed() ? location.getSpeed() : 0);
+            int battery = getBatteryPercent();
+            if (battery >= 0 && battery <= 100) point.put("battery", battery);
             enqueue(point);
         } catch (JSONException ignored) { }
+    }
+
+    private int getBatteryPercent() {
+        BatteryManager manager = (BatteryManager) getSystemService(BATTERY_SERVICE);
+        return manager == null ? -1 : manager.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY);
     }
 
     @Override
@@ -178,7 +186,7 @@ public final class LocationTrackingService extends Service implements LocationLi
     private boolean sendPoint(String json) {
         HttpURLConnection connection = null;
         try {
-            connection = (HttpURLConnection) new URL(serverBase + "/api/action").openConnection();
+            connection = (HttpURLConnection) new URL(serverBase + "/api/ingest/location").openConnection();
             connection.setRequestMethod("POST");
             connection.setConnectTimeout(6000);
             connection.setReadTimeout(10000);

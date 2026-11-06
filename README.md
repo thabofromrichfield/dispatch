@@ -53,7 +53,7 @@ The local **Diagnostics** control records app-level function calls, UI actions, 
 
 ## Android field APK
 
-The native Android project is under `android/`. It connects to the Dispatch server; it does not dial cellular calls, send SMS, or access the phone call log. Location uses Android GPS while clocked in and queues fixes offline. The phone must reach the server over HTTPS when secure cookies are enabled. Configure the server URL in the Android app; do not use `localhost` on a physical phone. To refresh bundled web assets, run `./scripts/sync-android-assets.sh`. Build with JDK 17 and Android SDK Platform 35:
+The native Android project is under `android/`. The APK is a lightweight field tracker only: sign-in, unit and shift selection, online/offline presence, background GPS, SOS, Dispatch app messages, and live in-app voice to control. It does not bundle the operations console, maps, reports, settings, or control-room tools. A fresh install defaults to `https://dispatch-brown-five.vercel.app`; use the **Server** button to change it. Messages are Dispatch app messages (not carrier SMS), and voice calls are in-app WebRTC calls (not cellular calls). Location uses Android GPS while clocked in and online, and queues fixes while connectivity is unavailable. The phone must reach the server over HTTPS when secure cookies are enabled. Do not use `localhost` on a physical phone. To refresh the small Android-only UI bundle, run `./scripts/sync-android-assets.sh`. Build with JDK 17 and Android SDK Platform 35:
 
 ```sh
 cd android

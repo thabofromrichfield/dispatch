@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#101820">
+  <title>Dispatch Field</title>
+  <link rel="stylesheet" href="/field.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand-mark">D</div>
+    <div class="brand-copy"><strong>FIELD</strong><small>Dispatch tracker</small></div>
+    <span id="networkBadge" class="network-badge">CONNECTING</span>
+    <button id="serverButton" class="icon-button" type="button" aria-label="Server settings" title="Server settings">⋯</button>
+  </header>
+
+  <main id="app" class="app-shell">
+    <section id="loginPanel" class="card login-card hidden">
+      <p class="eyebrow">SECURE SIGN IN</p>
+      <h1>Welcome back</h1>
+      <p class="muted">Sign in with your provisioned Dispatch account.</p>
+      <form id="loginForm">
+        <label>Email<input id="email" type="email" autocomplete="username" required></label>
+        <label>Password<input id="password" type="password" autocomplete="current-password" required></label>
+        <button id="loginButton" class="button primary full" type="submit">Sign in</button>
+      </form>
+      <p id="loginError" class="error-message hidden" role="alert"></p>
+    </section>
+
+    <section id="fieldPanel" class="hidden">
+      <section class="card identity-card">
+        <div class="section-heading">
+          <div><p class="eyebrow">YOUR FIELD UNIT</p><h1 id="unitName">Loading…</h1><p id="unitDetails" class="muted">Checking assignment</p></div>
+          <span id="unitState" class="state-chip">CONNECTING</span>
+        </div>
+        <label class="unit-picker-label" for="unitPicker">This phone is assigned to</label>
+        <select id="unitPicker" class="select"></select>
+        <div class="stats-row">
+          <div><span>Shift</span><b id="shiftValue">Off duty</b></div>
+          <div><span>GPS</span><b id="gpsValue">Waiting</b></div>
+          <div><span>Battery</span><b id="batteryValue">—</b></div>
+        </div>
+      </section>
+
+      <section class="card shift-card">
+        <p class="eyebrow">SHIFT & TRACKING</p>
+        <div id="sitePickerWrap" class="field-row hidden"><label for="sitePicker">Work site</label><select id="sitePicker" class="select"></select></div>
+        <div class="button-grid">
+          <button id="shiftButton" class="button primary" type="button">Clock in</button>
+          <button id="presenceButton" class="button ghost" type="button" disabled>Go online</button>
+        </div>
+        <p id="trackingNote" class="muted small">Location is shared only while you are clocked in and online.</p>
+      </section>
+
+      <button id="sosButton" class="sos-button" type="button" disabled><span class="sos-symbol">!</span><span><strong>SOS</strong><small>Send an emergency alert to control</small></span></button>
+      <p id="sosNotice" class="sos-notice hidden"></p>
+
+      <section class="card call-card">
+        <div class="section-heading"><div><p class="eyebrow">VOICE</p><h2>Call control</h2></div><span id="callState" class="muted small">Not connected</span></div>
+        <p class="muted small">Live Dispatch voice call over the app. It does not place a cellular phone call.</p>
+        <div class="button-grid">
+          <button id="callButton" class="button primary" type="button" disabled>Call control</button>
+          <button id="muteButton" class="button ghost hidden" type="button">Mute microphone</button>
+        </div>
+        <button id="endCallButton" class="button danger full hidden" type="button">End call</button>
+        <div id="incomingCall" class="incoming-call hidden"><b id="incomingCaller">Incoming call</b><div class="button-grid"><button id="acceptCallButton" class="button primary" type="button">Answer</button><button id="declineCallButton" class="button ghost" type="button">Decline</button></div></div>
+      </section>
+
+      <section class="card messages-card">
+        <div class="section-heading"><div><p class="eyebrow">DISPATCH MESSAGES</p><h2>Messages</h2></div><span id="messageCount" class="count-chip">0</span></div>
+        <div id="messageList" class="message-list"><p class="muted">No messages yet.</p></div>
+        <form id="messageForm" class="message-form">
+          <label class="sr-only" for="messageInput">Message to control</label>
+          <textarea id="messageInput" maxlength="1500" rows="2" placeholder="Message control…" disabled></textarea>
+          <button id="sendMessageButton" class="button primary" type="submit" disabled>Send</button>
+        </form>
+        <p class="muted small">These are Dispatch app messages, not SMS through your mobile network.</p>
+      </section>
+
+      <footer class="footer-row"><span id="lastContact">Last sync —</span><div><button id="refreshButton" class="text-button" type="button">Refresh</button><button id="signOutButton" class="text-button" type="button">Sign out</button></div></footer>
+    </section>
+  </main>
+
+  <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+  <script src="/native-bridge.js"></script>
+  <script src="/field.js"></script>
+</body>
+</html>

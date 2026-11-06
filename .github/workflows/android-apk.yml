@@ -5,6 +5,10 @@ on:
     branches:
       - main
       - arena/9515cdac-dispatch
+      - arena/5d2050bc-dispatch
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
