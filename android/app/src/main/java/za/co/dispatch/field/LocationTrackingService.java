@@ -28,6 +28,8 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -42,6 +44,7 @@ public final class LocationTrackingService extends Service implements LocationLi
     private static final String KEY_SERVER = "serverBase";
     private static final String KEY_TRACKING = "trackingOfficer";
     private static final String KEY_QUEUE = "pendingNativeLocations";
+    private static final int MAX_QUEUED_LOCATIONS = 5000;
     private static final String CHANNEL_ID = "dispatch-location";
     private static final int NOTIFICATION_ID = 4801;
 
@@ -52,6 +55,7 @@ public final class LocationTrackingService extends Service implements LocationLi
     private String officerId;
     private String serverBase;
     private long intervalMs;
+    private long lastQueueOverflowNoticeAt;
 
     @Override
     public void onCreate() {
@@ -75,15 +79,17 @@ public final class LocationTrackingService extends Service implements LocationLi
             officerId = intent.getStringExtra(EXTRA_OFFICER);
             int seconds = intent.getIntExtra(EXTRA_INTERVAL, 15);
             intervalMs = Math.max(2000L, Math.min(300L, seconds) * 1000L);
+            preferences.edit().putInt("trackingIntervalSeconds", (int) (intervalMs / 1000L)).apply();
         } else {
             serverBase = preferences.getString(KEY_SERVER, "");
             officerId = preferences.getString(KEY_TRACKING, null);
-            intervalMs = 15000L;
+            intervalMs = Math.max(2000L, Math.min(300L, preferences.getInt("trackingIntervalSeconds", 15)) * 1000L);
         }
         if (serverBase == null || serverBase.trim().isEmpty() || officerId == null || officerId.trim().isEmpty()) {
             stopSelf();
             return START_NOT_STICKY;
         }
+        migrateLegacyQueue();
         preferences.edit().putString(KEY_SERVER, serverBase).putString(KEY_TRACKING, officerId).apply();
         startForeground(NOTIFICATION_ID, buildNotification());
         beginTracking();
@@ -124,7 +130,7 @@ public final class LocationTrackingService extends Service implements LocationLi
             point.put("accuracy", location.hasAccuracy() ? location.getAccuracy() : JSONObject.NULL);
             point.put("timestamp", Instant.ofEpochMilli(location.getTime()).toString());
             point.put("eventId", officerId + "-android-" + location.getTime());
-            point.put("speed", location.hasSpeed() ? location.getSpeed() : 0);
+            point.put("speed", location.hasSpeed() ? location.getSpeed() : JSONObject.NULL);
             int battery = getBatteryPercent();
             if (battery >= 0 && battery <= 100) point.put("battery", battery);
             enqueue(point);
@@ -150,34 +156,44 @@ public final class LocationTrackingService extends Service implements LocationLi
     public void onStatusChanged(String provider, int status, android.os.Bundle extras) { }
 
     private void enqueue(JSONObject point) {
+        String queuedOfficer = point.optString("officerId", "");
+        if (queuedOfficer.isEmpty()) return;
         synchronized (queueLock) {
-            JSONArray queue = readQueue();
+            JSONArray queue = readQueue(queuedOfficer);
             queue.put(point);
-            while (queue.length() > 200) {
+            boolean droppedOldest = queue.length() > MAX_QUEUED_LOCATIONS;
+            while (queue.length() > MAX_QUEUED_LOCATIONS) {
                 JSONArray reduced = new JSONArray();
                 for (int i = 1; i < queue.length(); i++) reduced.put(queue.opt(i));
                 queue = reduced;
             }
-            preferences.edit().putString(KEY_QUEUE, queue.toString()).apply();
+            preferences.edit().putString(queueKey(queuedOfficer), queue.toString()).apply();
+            long now = System.currentTimeMillis();
+            if (droppedOldest && now - lastQueueOverflowNoticeAt > 300000L) {
+                lastQueueOverflowNoticeAt = now;
+                updateNotification("GPS backlog exceeded 5,000 fixes; oldest unsynced fixes were discarded");
+            }
         }
         network.execute(this::flushQueue);
     }
 
     private void flushQueue() {
+        String activeOfficer = officerId;
+        if (activeOfficer == null || activeOfficer.isEmpty()) return;
         while (true) {
             String first;
             synchronized (queueLock) {
-                JSONArray queue = readQueue();
+                JSONArray queue = readQueue(activeOfficer);
                 if (queue.length() == 0) return;
                 first = queue.optString(0, "");
             }
             if (first.isEmpty() || !sendPoint(first)) return;
             synchronized (queueLock) {
-                JSONArray queue = readQueue();
+                JSONArray queue = readQueue(activeOfficer);
                 if (queue.length() > 0 && first.equals(queue.optString(0))) {
                     JSONArray reduced = new JSONArray();
                     for (int i = 1; i < queue.length(); i++) reduced.put(queue.opt(i));
-                    preferences.edit().putString(KEY_QUEUE, reduced.toString()).apply();
+                    preferences.edit().putString(queueKey(activeOfficer), reduced.toString()).apply();
                 }
             }
         }
@@ -213,9 +229,45 @@ public final class LocationTrackingService extends Service implements LocationLi
         }
     }
 
-    private JSONArray readQueue() {
-        try { return new JSONArray(preferences.getString(KEY_QUEUE, "[]")); }
+    private String queueKey(String officer) {
+        String configuredServer = serverBase == null ? preferences.getString(KEY_SERVER, "") : serverBase;
+        return KEY_QUEUE + "." + Integer.toHexString(configuredServer.hashCode()) + "." + officer;
+    }
+
+    private JSONArray readQueue(String officer) {
+        try { return new JSONArray(preferences.getString(queueKey(officer), "[]")); }
         catch (JSONException ignored) { return new JSONArray(); }
+    }
+
+    private void migrateLegacyQueue() {
+        synchronized (queueLock) {
+            String legacy = preferences.getString(KEY_QUEUE, null);
+            if (legacy == null) return;
+            try {
+                JSONArray points = new JSONArray(legacy);
+                Map<String, JSONArray> queues = new HashMap<>();
+                for (int i = 0; i < points.length(); i++) {
+                    JSONObject point = points.optJSONObject(i);
+                    String queuedOfficer = point == null ? "" : point.optString("officerId", "");
+                    if (queuedOfficer.isEmpty()) continue;
+                    JSONArray queue = queues.computeIfAbsent(queuedOfficer, ignored -> new JSONArray());
+                    queue.put(point);
+                }
+                SharedPreferences.Editor editor = preferences.edit().remove(KEY_QUEUE);
+                for (Map.Entry<String, JSONArray> entry : queues.entrySet()) {
+                    JSONArray migrated = entry.getValue();
+                    while (migrated.length() > MAX_QUEUED_LOCATIONS) {
+                        JSONArray reduced = new JSONArray();
+                        for (int i = 1; i < migrated.length(); i++) reduced.put(migrated.opt(i));
+                        migrated = reduced;
+                    }
+                    editor.putString(queueKey(entry.getKey()), migrated.toString());
+                }
+                editor.apply();
+            } catch (JSONException ignored) {
+                preferences.edit().remove(KEY_QUEUE).apply();
+            }
+        }
     }
 
     private void stopLocationUpdates() {
@@ -227,7 +279,7 @@ public final class LocationTrackingService extends Service implements LocationLi
 
     private void stopTracking() {
         stopLocationUpdates();
-        preferences.edit().remove(KEY_TRACKING).apply();
+        preferences.edit().remove(KEY_TRACKING).remove("trackingIntervalSeconds").apply();
     }
 
     private Notification buildNotification() {

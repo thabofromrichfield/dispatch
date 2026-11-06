@@ -221,6 +221,7 @@ async function enterField() {
   currentUser = session.user;
   const previousUser = localStorage.getItem('dispatch-field-user-id') || '';
   if (previousUser && previousUser !== currentUser.id) {
+    stopNativeTracking();
     localStorage.removeItem('dispatch-field-last-state');
     localStorage.removeItem(QUEUE_KEY);
     fieldState = null;
@@ -236,6 +237,9 @@ async function enterField() {
 }
 function handleNetworkError(error) {
   if (error?.status === 401) {
+    clearInterval(stateTimer);
+    clearInterval(rtcTimer);
+    stateTimer = rtcTimer = null;
     stopNativeTracking();
     closeActiveCall(false).catch(() => {});
     currentUser = null;

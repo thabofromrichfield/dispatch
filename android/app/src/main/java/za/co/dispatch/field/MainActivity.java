@@ -45,6 +45,7 @@ import java.util.concurrent.Executors;
 public class MainActivity extends Activity {
     private static final String PREFS = "dispatch-field";
     private static final String KEY_SERVER = "serverBase";
+    private static final String KEY_TRACKING_INTERVAL = "trackingIntervalSeconds";
     private static final String DEFAULT_SERVER = "https://dispatch-brown-five.vercel.app";
     private static final String PREF_LOCATION_DENIED = "locationPermissionDenied";
     private static final String ASSET_ORIGIN = "https://appassets.androidplatform.net";
@@ -129,7 +130,7 @@ public class MainActivity extends Activity {
             if (!serverBase.equals(value)) {
                 Intent stop = new Intent(this, LocationTrackingService.class);
                 stop.setAction(LocationTrackingService.ACTION_STOP);
-                preferences.edit().remove("trackingOfficer").apply();
+                preferences.edit().remove("trackingOfficer").remove(KEY_TRACKING_INTERVAL).apply();
                 try { startService(stop); } catch (RuntimeException ignored) { }
             }
             serverBase = value;
@@ -240,7 +241,7 @@ public class MainActivity extends Activity {
     }
 
     private void startLocationService(String officerId, int interval) {
-        preferences.edit().putString("trackingOfficer", officerId).apply();
+        preferences.edit().putString("trackingOfficer", officerId).putInt(KEY_TRACKING_INTERVAL, interval).putString(KEY_SERVER, serverBase).apply();
         Intent intent = new Intent(this, LocationTrackingService.class);
         intent.setAction(LocationTrackingService.ACTION_START);
         intent.putExtra(LocationTrackingService.EXTRA_SERVER, serverBase);
@@ -401,7 +402,9 @@ public class MainActivity extends Activity {
         public boolean startTracking(String officerId, int intervalSeconds) {
             if (officerId == null || officerId.trim().isEmpty()) return false;
             int interval = Math.max(2, Math.min(300, intervalSeconds));
-            if (officerId.equals(preferences.getString("trackingOfficer", null))) return true;
+            if (officerId.equals(preferences.getString("trackingOfficer", null))
+                    && interval == preferences.getInt(KEY_TRACKING_INTERVAL, 15)
+                    && serverBase.equals(preferences.getString(KEY_SERVER, DEFAULT_SERVER))) return true;
             if (!hasFineLocation()) {
                 if (locationPermissionDenied) return true;
                 pendingOfficerId = officerId;
@@ -416,7 +419,7 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public void stopTracking() {
             if (preferences.getString("trackingOfficer", null) == null) return;
-            preferences.edit().remove("trackingOfficer").apply();
+            preferences.edit().remove("trackingOfficer").remove(KEY_TRACKING_INTERVAL).apply();
             runOnUiThread(() -> {
                 Intent intent = new Intent(context, LocationTrackingService.class);
                 intent.setAction(LocationTrackingService.ACTION_STOP);
