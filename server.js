@@ -58,7 +58,19 @@ async function cloudRequest(path,options={}){
   return body;
 }
 async function persistCloudSnapshot(snapshot){
-  await cloudRequest('/rest/v1/dispatch_state?on_conflict=id',{method:'POST',headers:{Prefer:'resolution=merge-duplicates,return=minimal'},body:JSON.stringify({id:1,payload:snapshot,updated_at:now()})});
+  let lastError;
+  for(let attempt=0;attempt<3;attempt++){
+    try{
+      await cloudRequest('/rest/v1/dispatch_state?on_conflict=id',{method:'POST',headers:{Prefer:'resolution=merge-duplicates,return=minimal'},body:JSON.stringify({id:1,payload:snapshot,updated_at:now()})});
+      return;
+    }catch(error){
+      lastError=error;
+      const retryable=!error.status||error.status>=500||[408,429].includes(error.status);
+      if(!retryable||attempt===2)break;
+      await new Promise(resolve=>setTimeout(resolve,500*(2**attempt)));
+    }
+  }
+  throw lastError;
 }
 async function initializeCloud(){
   if(!supabaseConfigured||!supabaseBaseValid){cloudInitError='Supabase server configuration is missing or invalid';return false;}
@@ -86,7 +98,7 @@ function scheduleCloudRecovery(){
 function save(){
   state.updatedAt=now();
   if(!supabaseConfigured||!cloudReady)return Promise.resolve();
-  const snapshot=structuredClone(state);const write=cloudWriteQueue.then(()=>{if(!cloudReady)throw Object.assign(new Error('Supabase storage is unavailable'),{status:503});return persistCloudSnapshot(snapshot);});cloudWriteQueue=write.catch(error=>{cloudReady=false;cloudInitError=`Supabase state persistence failed (${error.status||'network'})`;console.error(cloudInitError);scheduleCloudRecovery();});return write;
+  const snapshot=structuredClone(state);const write=cloudWriteQueue.then(()=>{if(!cloudReady)throw Object.assign(new Error('Supabase storage is unavailable'),{status:503});return persistCloudSnapshot(snapshot);});cloudWriteQueue=write.catch(error=>{if(cloudReady){cloudReady=false;cloudInitError=`Supabase state persistence failed (${error.status||'network'})`;console.error(cloudInitError);}scheduleCloudRecovery();});return write;
 }
 let state;
 try { state = JSON.parse(fs.readFileSync(DB, 'utf8')); } catch { state = seed(); save(); }
