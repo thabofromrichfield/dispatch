@@ -8,7 +8,8 @@ const PUBLIC = path.join(ROOT, 'public');
 const DATA_DIR = path.join(ROOT, 'data');
 const DB = path.join(DATA_DIR, 'dispatch.json');
 const BACKUP_DIR = path.join(DATA_DIR, 'backups');
-fs.mkdirSync(BACKUP_DIR, { recursive: true });
+const IS_VERCEL = Boolean(process.env.VERCEL);
+if (!IS_VERCEL) fs.mkdirSync(BACKUP_DIR, { recursive: true });
 const {record:recordDiagnostic,exportEvents:exportDiagnosticEvents}=require('./server-diagnostics');
 process.on('uncaughtExceptionMonitor',error=>recordDiagnostic('process.uncaughtException',{name:error?.name||'Error',message:error?.message||String(error),stack:error?.stack||''},'error'));
 process.on('warning',warning=>recordDiagnostic('process.warning',{name:warning?.name||'Warning',message:warning?.message||String(warning),stack:warning?.stack||''},'warning'));
@@ -48,7 +49,7 @@ function seed() {
     groups: ['North Sector','East Sector','West Sector','All units'], relays:[{id:'relay-main',name:'Johannesburg Control Node',host:'127.0.0.1',status:'configured',mode:'primary',lastCheck:null,latencyMs:null}], regions:[], scheduledMessages:[], callPatches:[], telemetry:[], emails:[], simulation:{active:false,startedAt:null,stoppedAt:null,units:{}}, updatedAt:date
   };
 }
-let cloudReady=false,cloudInitError=null,cloudWriteQueue=Promise.resolve(),cloudRecoveryTimer=null,cloudRecoveryDelay=5000,volatileCallIds=new Set();
+let cloudReady=false,cloudInitError=null,cloudWriteQueue=Promise.resolve(),cloudRecoveryTimer=null,cloudRecoveryDelay=5000,volatileCallIds=new Set(),vercelRequestQueue=Promise.resolve();
 function cloudHeaders(extra={}){return {'apikey':SUPABASE_SERVICE_ROLE_KEY,'Authorization':`Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,'Content-Type':'application/json',...extra};}
 async function cloudRequest(path,options={}){
   if(!supabaseConfigured||!supabaseBaseValid)throw Object.assign(new Error('Supabase server configuration is missing or invalid'),{status:503});
@@ -88,6 +89,25 @@ async function initializeCloud(){
     console.log('Supabase persistence initialized');return true;
   }catch(error){cloudReady=false;cloudInitError=`Supabase initialization failed (${error.status||'network'})`;console.error(cloudInitError);return false;}
 }
+async function refreshCloudState(){
+  const rows=await cloudRequest('/rest/v1/dispatch_state?select=payload&id=eq.1');
+  if(!Array.isArray(rows)||!rows[0]?.payload)throw Object.assign(new Error('Dispatch state is not initialized in Supabase'),{status:503});
+  state=rows[0].payload;state.locationEventIds ||= [];state.simulation ||= {active:false,startedAt:null,stoppedAt:null,units:{}};state.simulation.units ||= {};state.relays ||= [];state.settings ||= {};
+  locationEventSet.clear();for(const key of state.locationEventIds)locationEventSet.add(key);
+  cloudReady=true;cloudInitError=null;return state;
+}
+async function acquireCloudStateLock(ownerToken){
+  const deadline=Date.now()+10000;
+  while(Date.now()<deadline){const locked=await cloudRequest('/rest/v1/rpc/dispatch_try_acquire_state_lock',{method:'POST',body:JSON.stringify({p_owner_token:ownerToken,p_lease_seconds:60})});if(locked===true)return;await new Promise(resolve=>setTimeout(resolve,150));}
+  throw Object.assign(new Error('Dispatch is busy processing another update. Please retry.'),{status:503});
+}
+async function releaseCloudStateLock(ownerToken){try{await cloudRequest('/rest/v1/rpc/dispatch_release_state_lock',{method:'POST',body:JSON.stringify({p_owner_token:ownerToken})});}catch(error){recordDiagnostic('state.lock.release-failed',{status:error.status||null,message:error.message},'error');}}
+function rtcPeerUrl(query=''){return `/rest/v1/dispatch_rtc_peers?${query}`;}
+async function upsertRtcPeer(peer){await cloudRequest(rtcPeerUrl('on_conflict=peer_id'),{method:'POST',headers:{Prefer:'resolution=merge-duplicates,return=minimal'},body:JSON.stringify({peer_id:peer.peerId,role:peer.role,officer_id:peer.officerId,label:peer.label,last_seen:now()})});}
+async function liveRtcPeers(){const cutoff=new Date(Date.now()-RTC_PEER_TTL_MS).toISOString();const rows=await cloudRequest(rtcPeerUrl(`select=peer_id,role,officer_id,label,last_seen&last_seen=gte.${encodeURIComponent(cutoff)}`));return (rows||[]).map(peer=>({peerId:peer.peer_id,role:peer.role,officerId:peer.officer_id,label:peer.label,lastSeen:Date.parse(peer.last_seen)}));}
+async function getLiveRtcPeer(peerId){return (await liveRtcPeers()).find(peer=>peer.peerId===peerId)||null;}
+async function enqueueRtcSignal(signal){await cloudRequest('/rest/v1/dispatch_rtc_signals',{method:'POST',headers:{Prefer:'return=minimal'},body:JSON.stringify({id:signal.id,recipient_peer_id:signal.toPeer,from_peer_id:signal.fromPeer,call_id:signal.callId,signal_type:signal.type,payload:signal.payload,created_at:signal.at})});}
+async function dequeueRtcSignals(peerId){const rows=await cloudRequest(`/rest/v1/dispatch_rtc_signals?select=id,created_at,from_peer_id,call_id,signal_type,payload&recipient_peer_id=eq.${encodeURIComponent(peerId)}&order=created_at.asc&limit=100`);if(!rows?.length)return[];const ids=rows.map(row=>row.id);await cloudRequest(`/rest/v1/dispatch_rtc_signals?id=in.${encodeURIComponent(`(${ids.join(',')})`)}`,{method:'DELETE',headers:{Prefer:'return=minimal'}});return rows.map(row=>({id:row.id,at:row.created_at,fromPeer:row.from_peer_id,callId:row.call_id,type:row.signal_type,payload:row.payload||{}}));}
 function scheduleCloudRecovery(){
   if(cloudReady||cloudRecoveryTimer||!supabaseConfigured||!supabaseBaseValid)return;
   cloudRecoveryTimer=setTimeout(async()=>{
@@ -193,7 +213,7 @@ async function serveTomTomTrafficTile(res,url){
   try{const response=await fetch(upstream,{headers:{Accept:'image/png'},signal:AbortSignal.timeout(12000)});if(!response.ok)return send(res,502,JSON.stringify({error:`TomTom traffic tiles returned HTTP ${response.status}`}),'application/json; charset=utf-8');const data=Buffer.from(await response.arrayBuffer()),type=response.headers.get('content-type')||'image/png';if(data.length>2*1024*1024)return send(res,502,JSON.stringify({error:'TomTom traffic tile exceeded the allowed size'}),'application/json; charset=utf-8');if(trafficTileCache.size>300)trafficTileCache.clear();trafficTileCache.set(cacheKey,{data,type,until:Date.now()+30000});res.writeHead(200,{'Content-Type':type,'Cache-Control':'private, max-age=30','X-Content-Type-Options':'nosniff'});return res.end(data);}catch{return send(res,502,JSON.stringify({error:'Could not reach TomTom traffic tiles from the Dispatch server'}),'application/json; charset=utf-8');}
 }
 const MIME={'.html':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.js':'text/javascript; charset=utf-8','.json':'application/json; charset=utf-8','.webmanifest':'application/manifest+json; charset=utf-8','.svg':'image/svg+xml','.ico':'image/x-icon','.png':'image/png','.jpg':'image/jpeg','.webp':'image/webp','.woff2':'font/woff2','.woff':'font/woff'};
-const server=http.createServer(async(req,res)=>{
+const requestListener=async(req,res)=>{
   const url=new URL(req.url,'http://localhost');
   if(url.pathname.startsWith('/api/')){const startedAt=Date.now();res.once('finish',()=>recordDiagnostic('http.request',{method:req.method,path:url.pathname,status:res.statusCode,durationMs:Date.now()-startedAt},res.statusCode>=500?'error':res.statusCode>=400?'warning':'info'));}
   res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('X-Frame-Options','DENY');res.setHeader('Referrer-Policy','strict-origin-when-cross-origin');res.setHeader('Permissions-Policy','geolocation=(self), microphone=(self)');if(requestIsHttps(req))res.setHeader('Strict-Transport-Security','max-age=31536000; includeSubDomains');
@@ -205,10 +225,18 @@ const server=http.createServer(async(req,res)=>{
     if(!cloudReady&&!rtcRequest&&!actionRequest&&!trafficTileRequest&&!diagnosticsRequest)return send(res,503,JSON.stringify({error:cloudInitError?`Supabase storage unavailable: ${cloudInitError}. Check the database schema and connection.`:'Supabase storage is not ready. Check the database schema and connection.'}),'application/json; charset=utf-8');
     const authUser=await currentUser(req,res);if(!authUser)return send(res,401,JSON.stringify({error:'Sign in required'}),'application/json; charset=utf-8');
     if(req.method==='POST'&&!originAllowed(req))return send(res,403,JSON.stringify({error:'Request origin rejected'}),'application/json; charset=utf-8');
-    if(req.method==='POST'&&url.pathname==='/api/rtc/register'){try{const b=await readBody(req),peerId=String(b.peerId||''),role=b.role==='field'?'field':'control';if(!/^[a-zA-Z0-9_-]{12,80}$/.test(peerId))throw Error('Invalid voice peer id');if(role==='field'&&!state.officers.some(o=>o.id===b.officerId))throw Error('Choose a valid field terminal');rtcPeers.set(peerId,{peerId,role,officerId:role==='field'?b.officerId:'control',label:String(b.label||'').slice(0,80),lastSeen:Date.now()});if(role==='field')touchOfficerPresence(b.officerId);return send(res,200,JSON.stringify({ok:true}),'application/json; charset=utf-8');}catch(e){return send(res,400,JSON.stringify({ok:false,error:e.message}),'application/json; charset=utf-8');}}
-    if(req.method==='GET'&&url.pathname==='/api/rtc/peers'){const nowMs=Date.now();for(const [pid,p] of rtcPeers)if(nowMs-p.lastSeen>RTC_PEER_TTL_MS)rtcPeers.delete(pid);const officerId=url.searchParams.get('officerId'),role=url.searchParams.get('role');const peers=[...rtcPeers.values()].filter(p=>p.peerId!==url.searchParams.get('exclude')&&(!officerId||p.officerId===officerId)&&(!role||p.role===role)&&(p.role!=='field'||state.officers.some(o=>o.id===p.officerId&&o.shiftId&&!o.stunned))).map(({peerId,role,officerId,label})=>({peerId,role,officerId,label}));return send(res,200,JSON.stringify({peers}),'application/json; charset=utf-8');}
-    if(req.method==='GET'&&url.pathname==='/api/rtc/poll'){const peerId=url.searchParams.get('peer'),peer=rtcPeers.get(peerId);if(!peer||Date.now()-peer.lastSeen>RTC_PEER_TTL_MS)return send(res,404,JSON.stringify({error:'Voice client is not registered'}),'application/json; charset=utf-8');const messages=rtcInbox.get(peerId)||[];rtcInbox.delete(peerId);return send(res,200,JSON.stringify({messages}),'application/json; charset=utf-8');}
-    if(req.method==='POST'&&url.pathname==='/api/rtc/signal'){try{const b=await readBody(req),from=rtcPeers.get(b.fromPeer),to=rtcPeers.get(b.toPeer);if(!from||Date.now()-from.lastSeen>RTC_PEER_TTL_MS)throw Error('Caller voice client expired');if(!to||Date.now()-to.lastSeen>RTC_PEER_TTL_MS)throw Error('Target terminal has no live voice client');if(!['offer','answer','ice','hangup','reject'].includes(b.type))throw Error('Invalid voice signal');const queue=rtcInbox.get(b.toPeer)||[];if(queue.length>100)throw Error('Voice signal queue is full');queue.push({id:id('rtc'),at:now(),fromPeer:b.fromPeer,callId:String(b.callId||''),type:b.type,payload:b.payload||{}});rtcInbox.set(b.toPeer,queue);return send(res,200,JSON.stringify({ok:true}),'application/json; charset=utf-8');}catch(e){return send(res,409,JSON.stringify({ok:false,error:e.message}),'application/json; charset=utf-8');}}
+    if(req.method==='POST'&&url.pathname==='/api/rtc/register'){
+      try{const b=await readBody(req),peerId=String(b.peerId||''),role=b.role==='field'?'field':'control';if(!/^[a-zA-Z0-9_-]{12,80}$/.test(peerId))throw Error('Invalid voice peer id');if(role==='field'&&!state.officers.some(o=>o.id===b.officerId))throw Error('Choose a valid field terminal');const peer={peerId,role,officerId:role==='field'?b.officerId:'control',label:String(b.label||'').slice(0,80),lastSeen:Date.now()};if(IS_VERCEL)await upsertRtcPeer(peer);else rtcPeers.set(peerId,peer);if(role==='field')touchOfficerPresence(b.officerId);return send(res,200,JSON.stringify({ok:true}),'application/json; charset=utf-8');}catch(e){return send(res,400,JSON.stringify({ok:false,error:e.message}),'application/json; charset=utf-8');}
+    }
+    if(req.method==='GET'&&url.pathname==='/api/rtc/peers'){
+      const nowMs=Date.now();for(const [pid,p] of rtcPeers)if(nowMs-p.lastSeen>RTC_PEER_TTL_MS)rtcPeers.delete(pid);const officerId=url.searchParams.get('officerId'),role=url.searchParams.get('role'),available=IS_VERCEL?await liveRtcPeers():[...rtcPeers.values()];const peers=available.filter(p=>p.peerId!==url.searchParams.get('exclude')&&(!officerId||p.officerId===officerId)&&(!role||p.role===role)&&(p.role!=='field'||state.officers.some(o=>o.id===p.officerId&&o.shiftId&&!o.stunned))).map(({peerId,role,officerId,label})=>({peerId,role,officerId,label}));return send(res,200,JSON.stringify({peers}),'application/json; charset=utf-8');
+    }
+    if(req.method==='GET'&&url.pathname==='/api/rtc/poll'){
+      const peerId=url.searchParams.get('peer'),peer=IS_VERCEL?await getLiveRtcPeer(peerId):rtcPeers.get(peerId);if(!peer||(IS_VERCEL?peer.lastSeen<Date.now()-RTC_PEER_TTL_MS:Date.now()-peer.lastSeen>RTC_PEER_TTL_MS))return send(res,404,JSON.stringify({error:'Voice client is not registered'}),'application/json; charset=utf-8');const messages=IS_VERCEL?await dequeueRtcSignals(peerId):(rtcInbox.get(peerId)||[]);if(!IS_VERCEL)rtcInbox.delete(peerId);return send(res,200,JSON.stringify({messages}),'application/json; charset=utf-8');
+    }
+    if(req.method==='POST'&&url.pathname==='/api/rtc/signal'){
+      try{const b=await readBody(req),from=IS_VERCEL?await getLiveRtcPeer(b.fromPeer):rtcPeers.get(b.fromPeer),to=IS_VERCEL?await getLiveRtcPeer(b.toPeer):rtcPeers.get(b.toPeer);if(!from)throw Error('Caller voice client expired');if(!to)throw Error('Target terminal has no live voice client');if(!['offer','answer','ice','hangup','reject'].includes(b.type))throw Error('Invalid voice signal');const message={id:id('rtc'),at:now(),fromPeer:b.fromPeer,toPeer:b.toPeer,callId:String(b.callId||''),type:b.type,payload:b.payload||{}};if(IS_VERCEL)await enqueueRtcSignal(message);else{const queue=rtcInbox.get(b.toPeer)||[];if(queue.length>100)throw Error('Voice signal queue is full');queue.push(message);rtcInbox.set(b.toPeer,queue);}return send(res,200,JSON.stringify({ok:true}),'application/json; charset=utf-8');}catch(e){return send(res,409,JSON.stringify({ok:false,error:e.message}),'application/json; charset=utf-8');}
+    }
     if(req.method==='GET'&&url.pathname==='/api/diagnostics/export') return send(res,200,JSON.stringify({events:exportDiagnosticEvents()}),'application/json; charset=utf-8');
     if(req.method==='GET'&&url.pathname==='/api/state') { const since=url.searchParams.get('since'); const body=clientStateForAuthenticatedUser(); if(since && since===state.updatedAt) return send(res,304,''); return send(res,200,JSON.stringify(body),'application/json; charset=utf-8'); }
     if(req.method==='GET'&&url.pathname==='/api/export') { const format=url.searchParams.get('format')||'csv', type=url.searchParams.get('type')||'officers'; const rows=exportRows(type); if(format==='json')return send(res,200,JSON.stringify(rows,null,2),'application/json; charset=utf-8'); return send(res,200,toCsv(rows),'text/csv; charset=utf-8',{'Content-Disposition':`attachment; filename="dispatch-${type}-${new Date().toISOString().slice(0,10)}.csv"`}); }
@@ -226,7 +254,8 @@ const server=http.createServer(async(req,res)=>{
   if(file==='/'||file==='/')file='/index.html';
   const target=path.resolve(PUBLIC,`.${file}`); if(!target.startsWith(PUBLIC+path.sep)){return send(res,403,'Forbidden','text/plain');}
   fs.readFile(target,(e,content)=> e?send(res,404,'Not found','text/plain',{'Cache-Control':'no-store'}):send(res,200,content,MIME[path.extname(target)]||'application/octet-stream',{'Cache-Control':'no-cache'}));
-});
+};
+const server=http.createServer(requestListener);
 function makeSimulationRoute(officer,index){
   const site=state.sites.find(x=>x.id===officer.siteId&&x.areaType==='work')||state.sites.find(x=>x.areaType==='work');
   if(!site)return [];
@@ -300,7 +329,7 @@ function csvCell(v){let s=String(v??'');if(/^[=+\-@\t\r]/.test(s))s="'"+s;return
 function readBody(req){return new Promise((resolve,reject)=>{let data='';req.on('data',c=>{data+=c;if(data.length>25_000_000){reject(Error('Request too large'));req.destroy();}});req.on('end',()=>{try{resolve(data?JSON.parse(data):{});}catch{reject(Error('Invalid JSON'));}});req.on('error',reject);});}
 function send(res,status,body,type='text/plain; charset=utf-8',headers={}){res.writeHead(status,{'Content-Type':type,...headers});res.end(body);}
 function parseCookies(req){const out={};for(const part of String(req.headers.cookie||'').split(';')){const i=part.indexOf('=');if(i>0)try{out[part.slice(0,i).trim()]=decodeURIComponent(part.slice(i+1).trim());}catch{}}return out;}
-function requestIsHttps(req){return Boolean(req.socket.encrypted||(String(process.env.DISPATCH_TRUST_PROXY||'').toLowerCase()==='true'&&String(req.headers['x-forwarded-proto']||'').split(',')[0].trim()==='https'));}
+function requestIsHttps(req){return Boolean(req.socket.encrypted||((IS_VERCEL||String(process.env.DISPATCH_TRUST_PROXY||'').toLowerCase()==='true')&&String(req.headers['x-forwarded-proto']||'').split(',')[0].trim()==='https'));}
 function cookieLine(req,name,value,maxAge){const secure=String(process.env.DISPATCH_COOKIE_SECURE||'').toLowerCase()==='false'?false:(String(process.env.DISPATCH_COOKIE_SECURE||'').toLowerCase()==='true'||requestIsHttps(req));return `${name}=${encodeURIComponent(value)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAge}${secure?'; Secure':''}`;}
 function writeSessionCookies(req,res,session){const headers=[cookieLine(req,'dispatch_access',session.access_token,Math.max(60,Number(session.expires_in)||3600)),cookieLine(req,'dispatch_refresh',session.refresh_token,60*60*24*30)];res.setHeader('Set-Cookie',headers);}
 function clearSessionCookies(req,res){res.setHeader('Set-Cookie',[cookieLine(req,'dispatch_access','',0),cookieLine(req,'dispatch_refresh','',0)]);}
@@ -349,16 +378,41 @@ async function handleAuthApi(req,res,url){
 
 // Background rules: one-hour assignment warning and stale/offline state. Server timestamps are authoritative.
 let autoBackupInProgress=false,autoBackupRetryAt=0;
-setInterval(()=>{let dirty=false;const ms=Date.now();if(tickSimulation())dirty=true;for(const o of state.officers){if(o.online&&o.lastSeen&&ms-Date.parse(o.lastSeen)>Number(state.settings.offlineMinutes||5)*60000){o.online=false;raiseAlert('offline','Terminal offline',`${o.callSign} · last seen ${o.lastSeen}`,o,null);for(const a of state.alerts.filter(x=>x.type==='sos'&&x.officerId===o.id&&x.status!=='handled')){a.offline=true;a.sosSnapshot={...(a.sosSnapshot||{}),offline:true,online:false};}dirty=true;}if(o.shiftId&&o.status==='en-route'&&o.clockedInAt&&ms-Date.parse(o.clockedInAt)>Number(state.settings.absenceMinutes||60)*60000){const before=state.alerts.length;raiseAbsence(o,state.sites.find(s=>s.id===o.siteId)||{});dirty ||= state.alerts.length!==before;}}
+async function runMaintenance(){let dirty=false;const ms=Date.now();if(tickSimulation())dirty=true;for(const o of state.officers){if(o.online&&o.lastSeen&&ms-Date.parse(o.lastSeen)>Number(state.settings.offlineMinutes||5)*60000){o.online=false;raiseAlert('offline','Terminal offline',`${o.callSign} · last seen ${o.lastSeen}`,o,null);for(const a of state.alerts.filter(x=>x.type==='sos'&&x.officerId===o.id&&x.status!=='handled')){a.offline=true;a.sosSnapshot={...(a.sosSnapshot||{}),offline:true,online:false};}dirty=true;}if(o.shiftId&&o.status==='en-route'&&o.clockedInAt&&ms-Date.parse(o.clockedInAt)>Number(state.settings.absenceMinutes||60)*60000){const before=state.alerts.length;raiseAbsence(o,state.sites.find(s=>s.id===o.siteId)||{});dirty ||= state.alerts.length!==before;}}
   for(const m of state.messages){const recipient=state.officers.find(x=>x.id===m.to),groupOnline=m.to==='all'&&m.group&&state.officers.some(x=>x.group===m.group&&x.online);if(!m.deliveredAt&&(recipient?.online||groupOnline)){m.deliveredAt=now();dirty=true;}}
   const pending=state.scheduledMessages.filter(m=>m.scheduledAt&&Date.parse(m.scheduledAt)<=ms);if(pending.length){for(const m of pending){const recipient=state.officers.find(x=>x.id===m.to),groupOnline=m.to==='all'&&m.group&&state.officers.some(x=>x.group===m.group&&x.online),delivered=m.to==='all'?!m.group||Boolean(groupOnline)||Boolean(recipient?.online):Boolean(recipient?.online);m.deliveredAt=delivered?now():null;state.messages.unshift(m);}state.scheduledMessages=state.scheduledMessages.filter(m=>!pending.includes(m));dirty=true;}
   for(const a of state.alerts.filter(x=>x.type==='sos'&&x.status==='raised'&&!x.escalated&&ms-Date.parse(x.raisedAt)>Number(state.settings.sosEscalationMinutes||2)*60000)){a.escalated=true;a.events.push({status:'escalated',at:now(),by:'System'});dirty=true;}
   for(const c of state.calls.filter(x=>x.live&&x.status==='ringing'&&ms-Date.parse(x.startedAt)>90000)){c.status='failed';c.endedAt=now();c.failure='No endpoint answered';dirty=true;}
   const cutoff=ms-Math.max(1,Number(state.settings.retentionDays||90))*86400000;for(const o of state.officers){const before=(o.history||[]).length;o.history=(o.history||[]).filter(p=>Date.parse(p.receivedAt)>=cutoff);if(before!==o.history.length)dirty=true;}
   for(const key of ['messages','calls','recordings','alerts','traffic','telemetry','emails'])if(Array.isArray(state[key])){const before=state[key].length;state[key]=state[key].filter(x=>Date.parse(x.createdAt||x.raisedAt||x.startedAt||x.at||now())>=cutoff);if(before!==state[key].length)dirty=true;}
-  const lastAutoBackupAt=Date.parse(state.lastAutoBackup||'');if(!autoBackupInProgress&&ms>=autoBackupRetryAt&&(!Number.isFinite(lastAutoBackupAt)||ms-lastAutoBackupAt>=3600000)){autoBackupInProgress=true;makeBackup().then(backup=>{state.lastAutoBackup=now();autoBackupRetryAt=0;recordDiagnostic('backup.auto.succeeded',{file:backup.file,sizeBytes:backup.size});console.log(`Hourly full-state backup created: ${backup.file} (${backup.size} bytes)`);save().catch(error=>{recordDiagnostic('backup.auto.metadata-save-failed',{message:error.message,status:error.status||null},'error');console.error('Could not persist automatic backup timestamp:',error.message);});}).catch(error=>{autoBackupRetryAt=Date.now()+300000;recordDiagnostic('backup.auto.failed',{message:error.message,status:error.status||null},'error');console.error('Hourly full-state backup failed; retrying in five minutes:',error.message);}).finally(()=>{autoBackupInProgress=false;});}
-  if(dirty)save().catch(()=>{});
-},5000).unref();
+  const lastAutoBackupAt=Date.parse(state.lastAutoBackup||'');if(IS_VERCEL&&!autoBackupInProgress&&ms>=autoBackupRetryAt&&(!Number.isFinite(lastAutoBackupAt)||ms-lastAutoBackupAt>=3600000)){autoBackupInProgress=true;try{const backup=await makeBackup();state.lastAutoBackup=now();autoBackupRetryAt=0;recordDiagnostic('backup.auto.succeeded',{file:backup.file,sizeBytes:backup.size});await save();}catch(error){autoBackupRetryAt=Date.now()+300000;recordDiagnostic('backup.auto.failed',{message:error.message,status:error.status||null},'error');}finally{autoBackupInProgress=false;}}else if(!IS_VERCEL&&!autoBackupInProgress&&ms>=autoBackupRetryAt&&(!Number.isFinite(lastAutoBackupAt)||ms-lastAutoBackupAt>=3600000)){autoBackupInProgress=true;makeBackup().then(backup=>{state.lastAutoBackup=now();autoBackupRetryAt=0;recordDiagnostic('backup.auto.succeeded',{file:backup.file,sizeBytes:backup.size});console.log(`Hourly full-state backup created: ${backup.file} (${backup.size} bytes)`);save().catch(error=>{recordDiagnostic('backup.auto.metadata-save-failed',{message:error.message,status:error.status||null},'error');console.error('Could not persist automatic backup timestamp:',error.message);});}).catch(error=>{autoBackupRetryAt=Date.now()+300000;recordDiagnostic('backup.auto.failed',{message:error.message,status:error.status||null},'error');console.error('Hourly full-state backup failed; retrying in five minutes:',error.message);}).finally(()=>{autoBackupInProgress=false;});}
+  if(dirty)await save();
+}
+if(!IS_VERCEL)setInterval(()=>runMaintenance().catch(()=>{}),5000).unref();
 const PORT=Number(process.env.PORT||3000);
 const startServer=()=>server.listen(PORT,process.env.HOST||'0.0.0.0',()=>console.log(`Dispatch Control Room running locally at http://localhost:${PORT}`));
-if(supabaseConfigured&&supabaseBaseValid)initializeCloud().then(ready=>{if(!ready)scheduleCloudRecovery();}).finally(startServer);else startServer();
+const cloudInitialization=supabaseConfigured&&supabaseBaseValid?initializeCloud().then(ready=>{if(!ready&&!IS_VERCEL)scheduleCloudRecovery();return ready;}):Promise.resolve(false);
+if(IS_VERCEL){
+  async function processVercelRequest(req,res){
+    let lockToken=null;
+    try{
+      await cloudInitialization;
+      if(supabaseConfigured&&supabaseBaseValid&&!cloudReady)await initializeCloud();
+      const requestUrl=new URL(req.url,'http://localhost'),isApi=requestUrl.pathname.startsWith('/api/'),publicAuth=['/api/auth/status','/api/auth/login','/api/auth/logout','/api/auth/me','/api/auth/password'].includes(requestUrl.pathname),needsCloudState=isApi&&!publicAuth;
+      if(needsCloudState&&cloudReady){
+        if(req.method==='POST'&&requestUrl.pathname!=='/api/rtc/signal'){
+          lockToken=crypto.randomUUID();await acquireCloudStateLock(lockToken);
+        }
+        await refreshCloudState();
+        if(lockToken){const lastMaintenanceAt=Date.parse(state.maintenanceAt||'');if(!Number.isFinite(lastMaintenanceAt)||Date.now()-lastMaintenanceAt>=5000){state.maintenanceAt=now();await runMaintenance();await save();}}
+      }
+      await requestListener(req,res);
+      if(needsCloudState)await cloudWriteQueue;
+    }catch(error){
+      recordDiagnostic('vercel.function.failed',{method:req.method,path:String(req.url||'').slice(0,180),status:error.status||null,message:error.message},'error');
+      if(!res.headersSent)send(res,error.status||503,JSON.stringify({error:error.status===503?error.message:'Dispatch request failed'}),'application/json; charset=utf-8');
+      else if(!res.writableEnded)res.end();
+    }finally{if(lockToken)await releaseCloudStateLock(lockToken);}
+  }
+  module.exports=function vercelHandler(req,res){const task=vercelRequestQueue.then(()=>processVercelRequest(req,res));vercelRequestQueue=task.catch(()=>{});return task;};
+}else cloudInitialization.finally(startServer);
