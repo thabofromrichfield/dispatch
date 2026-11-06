@@ -4,5 +4,5 @@
   "private": true,
   "description": "Locally hosted traffic radio dispatch demo",
   "scripts": { "start": "node server.js", "dev": "node server.js" },
-  "engines": { "node": ">=20" }
+  "engines": { "node": ">=20 <27" }
 }
