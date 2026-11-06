@@ -34,6 +34,16 @@ Run `npm test` to verify the local server's unauthenticated startup/API behavior
 
 The repository's Vercel Node Function adapter serves the frontend assets from the deployed bundle and routes API requests through the same application server. Link the GitHub repository with `main` as its production branch. Before deploying, run the full current `supabase/schema.sql` in the Supabase SQL Editor, then add these values under the Vercel project's Environment Variables (do not share the service-role key in chat): `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, and `DISPATCH_COOKIE_SECURE=true`. Optionally add `TOMTOM_API_KEY` for live traffic. Redeploy after adding variables. Without the three Supabase values, sign-in and persisted operations cannot work.
 
+#### Vercel Speed Insights
+
+The control room reports Core Web Vitals (LCP, INP, CLS, FCP, TTFB) to Vercel Speed Insights through the `@vercel/speed-insights` dependency. Its browser build is vendored into [`public/vendor/vercel-speed-insights/`](public/vendor/vercel-speed-insights) and imported from `public/index.html`, so the page loads no third-party code from a CDN; the collector itself is the platform-provided `/_vercel/speed-insights/script.js`.
+
+1. In the Vercel project, open **Speed Insights** and choose **Enable** (the project must be redeployed before data appears).
+2. Deploy this branch so the vendored loader ships with the frontend assets.
+3. Load the deployed control room a few times; the first samples appear under **Speed Insights** within a few minutes, and the panel fills in as real traffic arrives. Only production deployments of the linked project report data.
+
+Local and self-hosted runs have no `/_vercel/speed-insights/script.js`, so the loader logs one console warning and sends nothing — no analytics leave those deployments. After upgrading the dependency, run `npm run vendor:speed-insights` and commit the regenerated files.
+
 The Vercel adapter stores shared state and WebRTC signaling in Supabase and uses a database lock for writes across function instances. Vercel functions are ephemeral, so maintenance (offline-timeout alerts, scheduled messages, retention cleanup, and hourly automatic backups) runs opportunistically on active write/heartbeat requests rather than on a continuous timer; it pauses when there is no app traffic. Manual backups remain available after Supabase is configured.
 
 ### First account and user access

@@ -82,10 +82,29 @@ test('server boot and unauthenticated API contract', async t => {
 
   const missingAsset = await fetch(`${baseUrl}/missing-client-asset.js`);
   assert.equal(missingAsset.status, 404);
+
+  const speedInsights = await fetch(`${baseUrl}/vendor/vercel-speed-insights/index.js`);
+  assert.equal(speedInsights.status, 200);
+  assert.match(speedInsights.headers.get('content-type'), /javascript/i);
+});
+
+test('Vercel Speed Insights loader matches the declared dependency', async () => {
+  const pkg = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'));
+  const dependency = pkg.dependencies?.['@vercel/speed-insights'];
+  assert.ok(dependency, 'package.json must declare @vercel/speed-insights');
+
+  const html = await readFile(path.join(root, 'public/index.html'), 'utf8');
+  assert.match(html, /from"\s*\/vendor\/vercel-speed-insights\/index\.js|vendor\/vercel-speed-insights\/index\.js/);
+  assert.match(html, /injectSpeedInsights\(\)/);
+
+  const vendored = await readFile(path.join(root, 'public/vendor/vercel-speed-insights/index.js'), 'utf8');
+  assert.match(vendored, new RegExp(`@vercel/speed-insights v${dependency.replace(/^[^\d]*/, '')}`), 'run npm run vendor:speed-insights');
+  assert.match(vendored, /export\s*\{[^}]*injectSpeedInsights/);
+  assert.ok((await readFile(path.join(root, 'public/vendor/vercel-speed-insights/LICENSE'), 'utf8')).includes('Apache'));
 });
 
 test('maintained JavaScript sources parse cleanly', () => {
-  for (const file of ['server.js', 'server-diagnostics.js', 'public/app.js', 'public/sw.js', 'android/field-app/field.js', 'android/native-bridge.js']) {
+  for (const file of ['server.js', 'server-diagnostics.js', 'public/app.js', 'public/sw.js', 'scripts/sync-speed-insights.js', 'android/field-app/field.js', 'android/native-bridge.js']) {
     const result = spawnSync(process.execPath, ['--check', path.join(root, file)], { encoding: 'utf8' });
     assert.equal(result.status, 0, `${file}: ${result.stderr || result.stdout}`);
   }

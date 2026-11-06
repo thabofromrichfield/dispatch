@@ -3,6 +3,16 @@
   "version": "1.0.0",
   "private": true,
   "description": "Live dispatch operations and field-unit coordination",
-  "scripts": { "start": "node server.js", "dev": "node server.js", "test": "node --test test/*.test.js" },
-  "engines": { "node": ">=22 <27" }
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "test": "node --test test/*.test.js",
+    "vendor:speed-insights": "node scripts/sync-speed-insights.js"
+  },
+  "engines": {
+    "node": ">=22 <27"
+  },
+  "dependencies": {
+    "@vercel/speed-insights": "^2.1.0"
+  }
 }
