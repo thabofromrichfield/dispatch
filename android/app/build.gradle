@@ -14,6 +14,19 @@ android {
         versionName '1.2.0'
     }
 
+    // Both CI workflows used to sign with the runner's throwaway debug keystore, so every new APK
+    // had a different signature and Android refused to install it over the previous release. This
+    // shared keystore keeps updates installable. It is a debug-grade key for sideload distribution;
+    // rotate it by replacing the file and bumping the version.
+    signingConfigs {
+        debug {
+            storeFile file('keystore/dispatch-field.jks')
+            storePassword 'dispatch-field'
+            keyAlias 'dispatch-field'
+            keyPassword 'dispatch-field'
+        }
+    }
+
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
