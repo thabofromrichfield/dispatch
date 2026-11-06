@@ -14,6 +14,7 @@ let rtcTimer = null;
 let rtcPeerId = '';
 let rtcBusy = false;
 let lastRegisterAt = 0;
+let gpsPermissionWarned = false;
 let activeCall = null;
 let pendingOffer = null;
 let pendingIce = new Map();
@@ -130,7 +131,13 @@ function syncNativeTracking() {
   const officer = fieldState?.officer;
   if (officer?.shiftId && officer.online && !officer.stunned) {
     const interval = Number(officer.config?.locationInterval || fieldState.settings?.locationInterval || 15);
-    window.DispatchNative?.startTracking?.(officer.id, interval);
+    const started = window.DispatchNative?.startTracking?.(officer.id, interval);
+    if (started === false) {
+      if (!gpsPermissionWarned) {
+        gpsPermissionWarned = true;
+        toast('Location is blocked. Allow Precise location for Dispatch Field in Android settings so control can see this unit.', true);
+      }
+    } else gpsPermissionWarned = false;
   } else stopNativeTracking();
 }
 

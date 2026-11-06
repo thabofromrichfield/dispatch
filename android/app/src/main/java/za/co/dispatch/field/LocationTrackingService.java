@@ -133,7 +133,9 @@ public final class LocationTrackingService extends Service implements LocationLi
             point.put("speed", location.hasSpeed() ? location.getSpeed() : JSONObject.NULL);
             int battery = getBatteryPercent();
             if (battery >= 0 && battery <= 100) point.put("battery", battery);
-            enqueue(point);
+            // Building the queue JSON and writing it to SharedPreferences is heavy once the offline
+            // backlog grows, so it runs on the network thread instead of the main looper.
+            network.execute(() -> enqueue(point));
         } catch (JSONException ignored) { }
     }
 
