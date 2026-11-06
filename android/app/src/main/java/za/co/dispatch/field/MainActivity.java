@@ -11,7 +11,6 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.view.Gravity;
-import android.view.View;
 import android.view.ViewGroup;
 import android.webkit.JavascriptInterface;
 import android.webkit.CookieManager;
@@ -22,29 +21,26 @@ import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
-import android.webkit.GeolocationPermissions;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
-import android.util.Base64;
 
-import androidx.webkit.ServiceWorkerClientCompat;
-import androidx.webkit.ServiceWorkerControllerCompat;
 import androidx.webkit.WebViewAssetLoader;
 
 import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
-import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.Iterator;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public class MainActivity extends Activity {
     private static final String PREFS = "dispatch-field";
@@ -56,12 +52,11 @@ public class MainActivity extends Activity {
     private static final int REQUEST_MICROPHONE = 4102;
 
     private SharedPreferences preferences;
-    private String serverBase = "";
+    private volatile String serverBase = "";
     private LinearLayout root;
-    private WebView webView;
+    private volatile WebView webView;
+    private final ExecutorService apiExecutor = Executors.newFixedThreadPool(3);
     private PermissionRequest pendingMediaRequest;
-    private GeolocationPermissions.Callback pendingGeoCallback;
-    private String pendingGeoOrigin;
     private String pendingOfficerId;
     private int pendingInterval = 15;
     private boolean locationPermissionRequestActive;
@@ -156,27 +151,12 @@ public class MainActivity extends Activity {
         root.setOrientation(LinearLayout.VERTICAL);
         root.setBackgroundColor(Color.rgb(8, 17, 30));
 
-        LinearLayout top = new LinearLayout(this);
-        top.setGravity(Gravity.CENTER_VERTICAL);
-        top.setPadding(dp(12), dp(4), dp(8), dp(4));
-        top.setBackgroundColor(Color.rgb(12, 24, 40));
-        TextView label = new TextView(this);
-        label.setText("DISPATCH FIELD");
-        label.setTextColor(Color.WHITE);
-        label.setTextSize(13);
-        label.setTypeface(null, android.graphics.Typeface.BOLD);
-        top.addView(label, new LinearLayout.LayoutParams(0, dp(42), 1));
-        Button serverButton = button("Server", false);
-        top.addView(serverButton, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(40)));
-        serverButton.setOnClickListener(v -> showConnectScreen());
-        root.addView(top, matchWidthWrap());
-
         webView = new WebView(this);
         WebSettings settings = webView.getSettings();
         settings.setJavaScriptEnabled(true);
         settings.setDomStorageEnabled(true);
-        settings.setDatabaseEnabled(true);
-        settings.setGeolocationEnabled(true);
+        settings.setDatabaseEnabled(false);
+        settings.setGeolocationEnabled(false);
         settings.setAllowFileAccess(false);
         settings.setAllowContentAccess(false);
         settings.setMediaPlaybackRequiresUserGesture(false);
@@ -191,9 +171,7 @@ public class MainActivity extends Activity {
         webView.setWebViewClient(new WebViewClient() {
             @Override
             public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
-                Uri uri = request.getUrl();
-                if (isTrafficTileRequest(uri)) return proxyTrafficTile(uri);
-                return assetLoader.shouldInterceptRequest(uri);
+                return assetLoader.shouldInterceptRequest(request.getUrl());
             }
 
             @Override
@@ -202,38 +180,18 @@ public class MainActivity extends Activity {
                 return !"appassets.androidplatform.net".equals(uri.getHost());
             }
         });
-        ServiceWorkerControllerCompat.getInstance().setServiceWorkerClient(new ServiceWorkerClientCompat() {
-            @Override
-            public WebResourceResponse shouldInterceptRequest(WebResourceRequest request) {
-                Uri uri = request.getUrl();
-                if (isTrafficTileRequest(uri)) return proxyTrafficTile(uri);
-                return assetLoader.shouldInterceptRequest(uri);
-            }
-        });
         webView.setWebChromeClient(new WebChromeClient() {
             @Override
             public void onPermissionRequest(PermissionRequest request) {
                 runOnUiThread(() -> handleWebPermission(request));
             }
 
-            @Override
-            public void onGeolocationPermissionsShowPrompt(String origin, GeolocationPermissions.Callback callback) {
-                runOnUiThread(() -> {
-                    if (hasFineLocation()) callback.invoke(origin, true, false);
-                    else if (locationPermissionDenied) callback.invoke(origin, false, false);
-                    else {
-                        pendingGeoOrigin = origin;
-                        pendingGeoCallback = callback;
-                        requestLocationPermission();
-                    }
-                });
-            }
         });
 
 
-        root.addView(webView, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
+        root.addView(webView, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         setContentView(root);
-        webView.loadUrl(ASSET_ORIGIN + "/index.html?view=field");
+        webView.loadUrl(ASSET_ORIGIN + "/index.html");
     }
 
     private void handleWebPermission(PermissionRequest request) {
@@ -274,11 +232,6 @@ public class MainActivity extends Activity {
     }
 
     private void completeLocationPermission(boolean granted) {
-        if (pendingGeoCallback != null) {
-            pendingGeoCallback.invoke(pendingGeoOrigin, granted, false);
-            pendingGeoCallback = null;
-            pendingGeoOrigin = null;
-        }
         if (pendingOfficerId != null) {
             if (granted) startLocationService(pendingOfficerId, pendingInterval);
             else Toast.makeText(this, "Precise location permission is required for background tracking", Toast.LENGTH_LONG).show();
@@ -332,104 +285,31 @@ public class MainActivity extends Activity {
             webView.destroy();
             webView = null;
         }
+        apiExecutor.shutdownNow();
         super.onDestroy();
-    }
-
-    private boolean isTrafficTileRequest(Uri uri) {
-        return uri != null
-                && "appassets.androidplatform.net".equalsIgnoreCase(uri.getHost())
-                && uri.getPath() != null
-                && uri.getPath().startsWith("/api/traffic/tiles/flow/");
-    }
-
-    private WebResourceResponse proxyTrafficTile(Uri uri) {
-        HttpURLConnection connection = null;
-        try {
-            if (!validServer(serverBase)) throw new IllegalArgumentException("Dispatch server URL is not configured");
-            URL target = new URL(serverBase + uri.getPath() + (uri.getEncodedQuery() == null ? "" : "?" + uri.getEncodedQuery()));
-            connection = (HttpURLConnection) target.openConnection();
-            connection.setRequestMethod("GET");
-            connection.setConnectTimeout(15000);
-            connection.setReadTimeout(30000);
-            connection.setRequestProperty("Accept", "image/png");
-            connection.setRequestProperty("X-Dispatch-Client", "android-field");
-            String cookieHeader = CookieManager.getInstance().getCookie(serverBase);
-            if (cookieHeader != null && !cookieHeader.isEmpty()) connection.setRequestProperty("Cookie", cookieHeader);
-            int status = connection.getResponseCode();
-            for (java.util.Map.Entry<String, java.util.List<String>> entry : connection.getHeaderFields().entrySet()) {
-                if (entry.getKey() != null && "set-cookie".equalsIgnoreCase(entry.getKey()) && entry.getValue() != null) {
-                    for (String cookie : entry.getValue()) CookieManager.getInstance().setCookie(serverBase, cookie);
-                }
-            }
-            CookieManager.getInstance().flush();
-            InputStream stream = status >= 400 ? connection.getErrorStream() : connection.getInputStream();
-            byte[] bytes = stream == null ? new byte[0] : readBytes(stream);
-            java.util.Map<String, String> headers = new java.util.HashMap<>();
-            String contentType = connection.getContentType();
-            if (contentType != null) headers.put("Content-Type", contentType);
-            String mimeType = "image/png", encoding = null;
-            if (contentType != null) {
-                String[] typeParts = contentType.split(";", 2);
-                mimeType = typeParts[0].trim();
-                if (typeParts.length > 1 && typeParts[1].toLowerCase(java.util.Locale.ROOT).contains("charset="))
-                    encoding = typeParts[1].substring(typeParts[1].toLowerCase(java.util.Locale.ROOT).indexOf("charset=") + 8).trim();
-            }
-            String cacheControl = connection.getHeaderField("Cache-Control");
-            if (cacheControl != null) headers.put("Cache-Control", cacheControl);
-            return new WebResourceResponse(mimeType, encoding, status,
-                    status >= 400 ? "Traffic tile request failed" : "OK", headers, new ByteArrayInputStream(bytes));
-        } catch (Exception error) {
-            byte[] message = ("Traffic tile proxy failed: " + error.getMessage()).getBytes(StandardCharsets.UTF_8);
-            java.util.Map<String, String> headers = new java.util.HashMap<>();
-            headers.put("Content-Type", "text/plain; charset=utf-8");
-            return new WebResourceResponse("text/plain", "UTF-8", 502, "Bad Gateway", headers, new ByteArrayInputStream(message));
-        } finally {
-            if (connection != null) connection.disconnect();
-        }
-    }
-
-    private static byte[] readBytes(InputStream stream) throws Exception {
-        try (InputStream in = stream; ByteArrayOutputStream out = new ByteArrayOutputStream()) {
-            byte[] buffer = new byte[8192];
-            int count;
-            while ((count = in.read(buffer)) != -1) out.write(buffer, 0, count);
-            return out.toByteArray();
-        }
-    }
-
-    private Button button(String text, boolean primary) {
-        Button button = new Button(this);
-        button.setText(text);
-        button.setAllCaps(false);
-        button.setTextColor(Color.WHITE);
-        button.setBackgroundColor(primary ? Color.rgb(37, 126, 213) : Color.rgb(28, 47, 68));
-        return button;
-    }
-
-    private int dp(float value) { return (int) (value * getResources().getDisplayMetrics().density + 0.5f); }
-    private LinearLayout.LayoutParams matchWrap() { return new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT); }
-    private LinearLayout.LayoutParams matchWidthWrap() { return matchWrap(); }
-
-    private static String normalizeServer(String raw) {
-        String value = raw == null ? "" : raw.trim();
-        while (value.endsWith("/")) value = value.substring(0, value.length() - 1);
-        return value;
-    }
-
-    private static boolean validServer(String value) {
-        try {
-            Uri uri = Uri.parse(value);
-            String scheme = uri.getScheme();
-            return "https".equalsIgnoreCase(scheme)
-                    && uri.getHost() != null && !uri.getHost().trim().isEmpty()
-                    && (uri.getPath() == null || uri.getPath().isEmpty() || "/".equals(uri.getPath()))
-                    && uri.getUserInfo() == null && uri.getQuery() == null && uri.getFragment() == null;
-        } catch (RuntimeException ignored) { return false; }
     }
 
     private final class DispatchBridge {
         private final Context context;
         DispatchBridge(Context context) { this.context = context; }
+
+        @JavascriptInterface
+        public void openServerSettings() {
+            MainActivity.this.runOnUiThread(MainActivity.this::showConnectScreen);
+        }
+
+        @JavascriptInterface
+        public void requestAsync(String path, String method, String headersJson, String body, String callbackId) {
+            if (callbackId == null || !callbackId.matches("[A-Za-z0-9_-]{1,100}")) return;
+            apiExecutor.execute(() -> {
+                String response = request(path, method, headersJson, body);
+                WebView target = webView;
+                if (target == null) return;
+                String script = "window.DispatchNativeResolve && window.DispatchNativeResolve("
+                        + JSONObject.quote(callbackId) + "," + JSONObject.quote(response) + ");";
+                target.post(() -> target.evaluateJavascript(script, null));
+            });
+        }
 
         @JavascriptInterface
         public String request(String path, String method, String headersJson, String body) {
@@ -469,10 +349,8 @@ public class MainActivity extends Activity {
                 CookieManager.getInstance().flush();
                 InputStream stream = status >= 400 ? connection.getErrorStream() : connection.getInputStream();
                 String contentType = connection.getContentType();
-                boolean binary = contentType != null && contentType.toLowerCase(java.util.Locale.ROOT).startsWith("image/");
                 result.put("status", status);
-                if (binary) result.put("bodyBase64", Base64.encodeToString(stream == null ? new byte[0] : readBytes(stream), Base64.NO_WRAP));
-                else result.put("body", stream == null ? "" : readUtf8(stream));
+                result.put("body", stream == null ? "" : readUtf8(stream));
                 JSONObject responseHeaders = new JSONObject();
                 if (contentType != null) responseHeaders.put("Content-Type", contentType);
                 responseHeaders.put("Cache-Control", connection.getHeaderField("Cache-Control") == null ? "no-store" : connection.getHeaderField("Cache-Control"));

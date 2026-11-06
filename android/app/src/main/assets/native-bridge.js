@@ -1,38 +1,41 @@
 (() => {
   const native = window.DispatchNative;
-  if (!native || window.__dispatchNativeFetchInstalled) return;
-  window.__dispatchNativeFetchInstalled = true;
-  const realFetch = window.fetch.bind(window);
-  window.fetch = function(input, init = {}) {
-    let url;
-    try {
-      url = new URL(typeof input === 'string' || input instanceof URL ? input : input.url, location.href);
-    } catch (_) {
-      return realFetch(input, init);
-    }
-    if (url.origin !== location.origin || !url.pathname.startsWith('/api/')) return realFetch(input, init);
-    const method = String(init.method || (input instanceof Request ? input.method : 'GET')).toUpperCase();
-    const body = init.body !== undefined ? init.body : null;
-    if (body != null && typeof body !== 'string' && !(body instanceof URLSearchParams)) return realFetch(input, init);
-    const headers = new Headers(init.headers || (input instanceof Request ? input.headers : undefined));
-    const headerObject = {};
-    headers.forEach((value, key) => headerObject[key] = value);
-    try {
-      const raw = native.request(url.pathname + url.search, method, JSON.stringify(headerObject), body == null ? '' : String(body));
-      const result = JSON.parse(raw);
-      let responseBody = result.body || '';
-      if (result.bodyBase64) {
-        const binary = atob(result.bodyBase64);
-        const bytes = new Uint8Array(binary.length);
-        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-        responseBody = bytes;
+  const pending = new Map();
+  let sequence = 0;
+
+  window.DispatchNativeResolve = (id, raw) => {
+    const request = pending.get(id);
+    if (!request) return;
+    pending.delete(id);
+    clearTimeout(request.timer);
+    try { request.resolve(JSON.parse(raw)); }
+    catch (_) { request.resolve({ status: 503, body: JSON.stringify({ error: 'Invalid server response' }) }); }
+  };
+
+  window.DispatchAPI = {
+    request(path, method = 'GET', body = '') {
+      if (native?.requestAsync) {
+        const id = `field-${Date.now()}-${++sequence}`;
+        return new Promise(resolve => {
+          const timer = setTimeout(() => {
+            const request = pending.get(id);
+            if (!request) return;
+            pending.delete(id);
+            request.resolve({ status: 504, body: JSON.stringify({ error: 'The server took too long to respond' }) });
+          }, 50000);
+          pending.set(id, { resolve, timer });
+          native.requestAsync(path, method, JSON.stringify({
+            Accept: 'application/json',
+            ...(body ? { 'Content-Type': 'application/json' } : {})
+          }), body, id);
+        });
       }
-      return Promise.resolve(new Response(responseBody, {
-        status: result.status || 200,
-        headers: result.headers || {}
-      }));
-    } catch (error) {
-      return Promise.reject(error);
+      return fetch(path, {
+        method,
+        credentials: 'same-origin',
+        headers: { Accept: 'application/json', ...(body ? { 'Content-Type': 'application/json' } : {}) },
+        ...(body ? { body } : {})
+      }).then(async response => ({ status: response.status, body: await response.text() }));
     }
   };
 })();
