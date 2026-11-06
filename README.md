@@ -45,7 +45,7 @@ The app persists call/session records and saved recordings; live WebRTC audio is
 
 1. From Live operations, choose **Start route simulation**. Clocked-in demo units move around their assigned sites and the server stores their timestamped simulated fixes. Stop the simulation with the same control.
 2. Open **Field** in a second tab, sign in with a provisioned user, clock in, and grant location permission to share device GPS. Offline fixes queue for retry.
-3. For voice, start a private/group/all call from **Voice dispatch**, accept it in the Field view, and grant microphone permission. Both clients need direct network reachability; no STUN/TURN or SIP/PBX gateway is bundled. Microphone use outside localhost requires a secure context.
+3. For voice, start a private/group/all call from **Voice dispatch**, accept it in the Field view, and grant microphone permission. Calls require another signed-in, on-shift Field client to be connected; public STUN discovery is enabled for direct peer connections, but no TURN relay or SIP/PBX gateway is bundled, so restrictive networks may still block audio. Microphone use outside localhost requires a secure context.
 4. **Record local mic** captures a consented local microphone clip for playback; it does not silently record remote call audio.
 
 ## Diagnostics and bug reports

@@ -29,8 +29,8 @@ function seed() {
   return {
     version: 1,
     locationEventIds: [],
-    lastAutoBackup: date,
-    settings: { company: 'Metro Traffic Operations', timezone: 'Africa/Johannesburg', absenceMinutes: 60, offlineMinutes: 5, geofenceReadings: 2, gpsAccuracy: 50, locationInterval: 15, retentionDays: 90, sosEscalationMinutes: 2, speedLimit: 90, trafficProvider: 'tomtom', trafficKey: '', trafficEnabled: false, mapProvider: 'Esri World Street Map', mapTileUrl: '/tiles/{z}/{x}/{y}.png', smtpHost: '', emailFrom: '', backupFrequency: 'daily', backupRetention: 14, supervisor: '', soundEnabled: true },
+    lastAutoBackup: null,
+    settings: { company: 'Metro Traffic Operations', timezone: 'Africa/Johannesburg', absenceMinutes: 60, offlineMinutes: 5, geofenceReadings: 2, gpsAccuracy: 50, locationInterval: 15, retentionDays: 90, sosEscalationMinutes: 2, speedLimit: 90, trafficProvider: 'tomtom', trafficKey: '', trafficEnabled: false, mapProvider: 'Esri World Street Map', mapTileUrl: '/tiles/{z}/{x}/{y}.png', smtpHost: '', emailFrom: '', backupFrequency: 'hourly', backupRetention: 14, supervisor: '', soundEnabled: true },
     sites: [
       { id: 'site-sandton', name: 'Sandton Drive & Rivonia Rd', areaType: 'work', color: '#e0a12a', coordinates: [[-26.1038,28.0535],[-26.1038,28.0592],[-26.108,28.0592],[-26.108,28.0535]], assigned: ['officer-01','officer-02'], tolerance: 40 },
       { id: 'site-m1', name: 'M1 Grayston Interchange', areaType: 'work', color: '#648b73', coordinates: [[-26.0955,28.064],[-26.0955,28.070],[-26.1005,28.070],[-26.1005,28.064]], assigned: ['officer-03'], tolerance: 40 },
@@ -48,7 +48,7 @@ function seed() {
     groups: ['North Sector','East Sector','West Sector','All units'], relays:[{id:'relay-main',name:'Johannesburg Control Node',host:'127.0.0.1',status:'configured',mode:'primary',lastCheck:null,latencyMs:null}], regions:[], scheduledMessages:[], callPatches:[], telemetry:[], emails:[], simulation:{active:false,startedAt:null,stoppedAt:null,units:{}}, updatedAt:date
   };
 }
-let cloudReady=false,cloudInitError=null,cloudWriteQueue=Promise.resolve(),cloudRecoveryTimer=null,cloudRecoveryDelay=5000;
+let cloudReady=false,cloudInitError=null,cloudWriteQueue=Promise.resolve(),cloudRecoveryTimer=null,cloudRecoveryDelay=5000,volatileCallIds=new Set();
 function cloudHeaders(extra={}){return {'apikey':SUPABASE_SERVICE_ROLE_KEY,'Authorization':`Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,'Content-Type':'application/json',...extra};}
 async function cloudRequest(path,options={}){
   if(!supabaseConfigured||!supabaseBaseValid)throw Object.assign(new Error('Supabase server configuration is missing or invalid'),{status:503});
@@ -76,12 +76,17 @@ async function initializeCloud(){
   if(!supabaseConfigured||!supabaseBaseValid){cloudInitError='Supabase server configuration is missing or invalid';return false;}
   try{
     const rows=await cloudRequest('/rest/v1/dispatch_state?select=payload&id=eq.1');
-    if(Array.isArray(rows)&&rows.length){state=rows[0].payload;}
-    else await persistCloudSnapshot(state);
+    const pendingCalls=Array.isArray(state?.calls)?state.calls.filter(call=>volatileCallIds.has(call.id)):[];
+    if(Array.isArray(rows)&&rows.length){
+      const remote=rows[0].payload;
+      state=pendingCalls.length?{...remote,calls:[...pendingCalls,...(remote.calls||[]).filter(call=>!volatileCallIds.has(call.id))]}:remote;
+    }else await persistCloudSnapshot(state);
     state.locationEventIds ||= [];state.simulation ||= {active:false,startedAt:null,stoppedAt:null,units:{}};state.simulation.units ||= {};state.relays ||= [];state.settings ||= {};
     locationEventSet.clear();for(const key of state.locationEventIds)locationEventSet.add(key);
-    cloudReady=true;cloudInitError=null;console.log('Supabase persistence initialized');return true;
-  }catch(error){cloudInitError=`Supabase initialization failed (${error.status||'network'})`;console.error(cloudInitError);return false;}
+    cloudReady=true;cloudInitError=null;
+    if(pendingCalls.length){await persistCloudSnapshot(state);for(const call of pendingCalls)volatileCallIds.delete(call.id);}
+    console.log('Supabase persistence initialized');return true;
+  }catch(error){cloudReady=false;cloudInitError=`Supabase initialization failed (${error.status||'network'})`;console.error(cloudInitError);return false;}
 }
 function scheduleCloudRecovery(){
   if(cloudReady||cloudRecoveryTimer||!supabaseConfigured||!supabaseBaseValid)return;
@@ -103,6 +108,10 @@ function save(){
 let state;
 try { state = JSON.parse(fs.readFileSync(DB, 'utf8')); } catch { state = seed(); save(); }
 state.locationEventIds ||= [];
+state.settings ||= {};
+const backupFrequencyMigrated=state.settings.backupFrequency!=='hourly';
+state.settings.backupFrequency='hourly';
+if(backupFrequencyMigrated)save().catch(error=>console.error('Could not persist hourly backup schedule:',error.message));
 state.simulation ||= {active:false,startedAt:null,stoppedAt:null,units:{}};
 state.simulation.units ||= {};
 state.relays ||= [];
@@ -182,7 +191,8 @@ const server=http.createServer(async(req,res)=>{
   if(url.pathname.startsWith('/api/')) {
     res.setHeader('Cache-Control','no-store');
     if(!supabaseConfigured||!supabaseBaseValid)return send(res,503,JSON.stringify({error:'Supabase server configuration is required.'}),'application/json; charset=utf-8');
-    if(!cloudReady)return send(res,503,JSON.stringify({error:cloudInitError?`Supabase storage unavailable: ${cloudInitError}. Check the database schema and connection.`:'Supabase storage is not ready. Check the database schema and connection.'}),'application/json; charset=utf-8');
+    const rtcRequest=url.pathname.startsWith('/api/rtc/'),actionRequest=req.method==='POST'&&url.pathname==='/api/action',trafficTileRequest=req.method==='GET'&&url.pathname.startsWith('/api/traffic/tiles/flow/'),diagnosticsRequest=req.method==='GET'&&url.pathname==='/api/diagnostics/export';
+    if(!cloudReady&&!rtcRequest&&!actionRequest&&!trafficTileRequest&&!diagnosticsRequest)return send(res,503,JSON.stringify({error:cloudInitError?`Supabase storage unavailable: ${cloudInitError}. Check the database schema and connection.`:'Supabase storage is not ready. Check the database schema and connection.'}),'application/json; charset=utf-8');
     const authUser=await currentUser(req,res);if(!authUser)return send(res,401,JSON.stringify({error:'Sign in required'}),'application/json; charset=utf-8');
     if(req.method==='POST'&&!originAllowed(req))return send(res,403,JSON.stringify({error:'Request origin rejected'}),'application/json; charset=utf-8');
     if(req.method==='POST'&&url.pathname==='/api/rtc/register'){try{const b=await readBody(req),peerId=String(b.peerId||''),role=b.role==='field'?'field':'control';if(!/^[a-zA-Z0-9_-]{12,80}$/.test(peerId))throw Error('Invalid voice peer id');if(role==='field'&&!state.officers.some(o=>o.id===b.officerId))throw Error('Choose a valid field terminal');rtcPeers.set(peerId,{peerId,role,officerId:role==='field'?b.officerId:'control',label:String(b.label||'').slice(0,80),lastSeen:Date.now()});return send(res,200,JSON.stringify({ok:true}),'application/json; charset=utf-8');}catch(e){return send(res,400,JSON.stringify({ok:false,error:e.message}),'application/json; charset=utf-8');}}
@@ -195,7 +205,7 @@ const server=http.createServer(async(req,res)=>{
     if(req.method==='POST'&&url.pathname==='/api/traffic/sample') { try { const b=await readBody(req);if(b.force&&authUser.role!=='admin')return send(res,403,JSON.stringify({ok:false,error:'Administrator access required to force a traffic refresh'}),'application/json; charset=utf-8');const result=await sampleTomTomTraffic(String(b.siteId||''),{force:Boolean(b.force)});return send(res,200,JSON.stringify({ok:true,...result}),'application/json; charset=utf-8'); }catch(e){return send(res,e.status||502,JSON.stringify({ok:false,error:e.message||'Traffic sample failed'}),'application/json; charset=utf-8');} }
     if(req.method==='GET'&&url.pathname.startsWith('/api/traffic/tiles/flow/')) return serveTomTomTrafficTile(res,url);
     if(req.method==='POST'&&url.pathname==='/api/traffic') { try { const b=await readBody(req), site=state.sites.find(x=>x.id===b.siteId); if(!site)throw Error('Unknown site'); const currentSpeed=Number(b.currentSpeed),freeFlowSpeed=Number(b.freeFlowSpeed);if(!Number.isFinite(currentSpeed)||!Number.isFinite(freeFlowSpeed)||freeFlowSpeed<=0)throw Error('Invalid flow reading'); const ratio=Math.max(0,Math.min(1,currentSpeed/freeFlowSpeed));const level=b.roadClosure?'stopped':ratio<.25?'heavy':ratio<.55?'slow':ratio<.8?'moderate':'free'; const reading={id:id('traffic'),siteId:site.id,at:now(),currentSpeed,freeFlowSpeed,confidence:Number(b.confidence||0),roadClosure:Boolean(b.roadClosure),ratio,level,provider:'TomTom'};state.traffic.push(reading);if(state.traffic.length>100000)state.traffic.splice(0,1000);await save();return send(res,200,JSON.stringify({ok:true,reading}),'application/json; charset=utf-8'); } catch(e) { return send(res,e.status?503:400,JSON.stringify({ok:false,error:e.status?'Supabase persistence failed':e.message}),'application/json; charset=utf-8'); } }
-    if(req.method==='POST'&&url.pathname==='/api/action') { try { const body=await readBody(req);recordDiagnostic('system.action',{action:String(body.type||'unknown').slice(0,80)},'info'); body.actor=authUser.email||'Authenticated user'; if(authUser.role!=='admin'&&['settings','backup','import','officer-delete','site-delete','region-delete','group-delete'].includes(body.type))return send(res,403,JSON.stringify({error:'Administrator access required for this action'}),'application/json; charset=utf-8');const result=await action(body); await save(); return send(res,200,JSON.stringify({ok:true,result,state:clientStateForRole(authUser.role)}),'application/json; charset=utf-8'); } catch(e) { return send(res,e.status?503:400,JSON.stringify({ok:false,error:e.status?'Supabase persistence failed':e.message}),'application/json; charset=utf-8'); } }
+    if(req.method==='POST'&&url.pathname==='/api/action') { try { const body=await readBody(req),callAction=['call-start','call-answer','call-fail','call-end'].includes(body.type);if(!cloudReady&&!callAction)return send(res,503,JSON.stringify({ok:false,error:cloudInitError?`Supabase storage unavailable: ${cloudInitError}`:'Supabase storage is not ready'}),'application/json; charset=utf-8');recordDiagnostic('system.action',{action:String(body.type||'unknown').slice(0,80)},'info'); body.actor=authUser.email||'Authenticated user'; if(authUser.role!=='admin'&&['settings','backup','import','officer-delete','site-delete','region-delete','group-delete'].includes(body.type))return send(res,403,JSON.stringify({error:'Administrator access required for this action'}),'application/json; charset=utf-8');const result=await action(body);let volatile=false;try{await save();}catch(error){if(!callAction)throw error;volatile=true;}if(callAction&&!cloudReady){volatile=true;const callId=result.call||body.id;if(callId)volatileCallIds.add(callId);}return send(res,200,JSON.stringify({ok:true,result,state:clientStateForRole(authUser.role),volatile}),'application/json; charset=utf-8'); } catch(e) { return send(res,e.status?503:400,JSON.stringify({ok:false,error:e.status?'Supabase persistence failed':e.message}),'application/json; charset=utf-8'); } }
     if(req.method==='POST'&&url.pathname==='/api/ingest/location') { try { const b=await readBody(req), o=state.officers.find(x=>x.id===b.officerId); if(!o)throw Error('Unknown officer'); const r=processLocation(o,b); await save(); return send(res,200,JSON.stringify({ok:true,...r}),'application/json; charset=utf-8'); }catch(e){return send(res,e.status?503:400,JSON.stringify({ok:false,error:e.status?'Supabase persistence failed':e.message}),'application/json; charset=utf-8');} }
     if(req.method==='POST'&&url.pathname==='/api/backup') { if(authUser.role!=='admin')return send(res,403,JSON.stringify({error:'Administrator access required'}),'application/json; charset=utf-8');try{return send(res,200,JSON.stringify(await makeBackup()),'application/json; charset=utf-8');}catch(e){return send(res,503,JSON.stringify({error:'Supabase backup failed'}),'application/json; charset=utf-8');} }
     if(req.method==='GET'&&url.pathname==='/api/backups') { if(authUser.role!=='admin')return send(res,403,JSON.stringify({error:'Administrator access required'}),'application/json; charset=utf-8');try{return send(res,200,JSON.stringify(await listBackups()),'application/json; charset=utf-8');}catch{return send(res,503,JSON.stringify({error:'Supabase backup storage is unavailable'}),'application/json; charset=utf-8');} }
@@ -260,8 +270,7 @@ function action(b) {
     case 'patch-save': {const p={id:id('patch'),name:b.name||'Audio patch',members:b.members||[],active:true,createdAt:at};state.callPatches.push(p);audit('Audio patch preset saved',p.name,actor);return {};}
     case 'patch-stop': {const p=state.callPatches.find(x=>x.id===b.id);if(p)p.active=false;audit('Audio patch removed',b.id,actor);return {};}
     case 'telemetry': {if(!o)throw Error('Choose a terminal');const t={id:id('tel'),officerId:o.id,point:b.point||'Auxiliary output 1',value:b.value??true,at};state.telemetry.unshift(t);o.outputs ||= {};o.outputs[t.point]=t.value;audit('Simulated telemetry output changed',`${o.callSign} · ${t.point} · ${t.value?'ON':'OFF'}`,actor);return {output:t};}
-    case 'email': {const e={id:id('email'),to:b.to,subject:b.subject||'Dispatch message',body:b.body,at,status:'local-only'};state.emails.unshift(e);audit('Email saved to local outbox',e.to,actor);return {email:e.id};}
-    case 'settings': {Object.assign(state.settings,b.settings||{});if(Object.hasOwn(b.settings||{},'mapProvider'))state.settings.mapProviderUserSet=true;audit('System settings changed','Settings',actor);return {}; }
+    case 'settings': {Object.assign(state.settings,b.settings||{});state.settings.backupFrequency='hourly';if(Object.hasOwn(b.settings||{},'mapProvider'))state.settings.mapProviderUserSet=true;audit('System settings changed','Settings',actor);return {}; }
     case 'audit': audit(b.action||'Console action',b.target||'',actor);return {};
     case 'import': {const list=b.officers||[];let added=0;for(const item of list){if(!item.name)continue;const dup=state.officers.some(x=>x.callSign===item.callSign);if(dup)continue;action({type:'officer-save',officer:item,actor});added++;}audit('Batch import',`${added} officers`);return {added};}
     case 'simulation-start': {if(state.simulation?.active)return {started:false,active:true};const units=state.officers.filter(x=>x.shiftId&&x.tracking&&!x.stunned);if(!units.length)throw Error('Clock in at least one active unit before starting the route simulation');const tracks={};units.forEach((person,index)=>{const route=makeSimulationRoute(person,index);if(route.length>1)tracks[person.id]={route,leg:0,progress:0,sequence:0,seed:index+1};});if(!Object.keys(tracks).length)throw Error('No work site is available for the route simulation');state.simulation={active:true,startedAt:at,stoppedAt:null,lastTick:null,units:tracks};audit('Route simulation started',`${units.length} active units`,actor);return {started:true,units:units.length};}
@@ -329,13 +338,14 @@ async function handleAuthApi(req,res,url){
 }
 
 // Background rules: one-hour assignment warning and stale/offline state. Server timestamps are authoritative.
+let autoBackupInProgress=false,autoBackupRetryAt=0;
 setInterval(()=>{let dirty=false;const ms=Date.now();if(tickSimulation())dirty=true;for(const o of state.officers){if(o.online&&o.lastSeen&&ms-Date.parse(o.lastSeen)>Number(state.settings.offlineMinutes||5)*60000){o.online=false;raiseAlert('offline','Terminal offline',`${o.callSign} · last seen ${o.lastSeen}`,o,null);dirty=true;}if(o.shiftId&&o.status==='en-route'&&o.clockedInAt&&ms-Date.parse(o.clockedInAt)>Number(state.settings.absenceMinutes||60)*60000){const before=state.alerts.length;raiseAbsence(o,state.sites.find(s=>s.id===o.siteId)||{});dirty ||= state.alerts.length!==before;}}
   for(const m of state.messages){const recipient=state.officers.find(x=>x.id===m.to);if(!m.deliveredAt&&recipient?.online&&!recipient.stunned){m.deliveredAt=now();dirty=true;}}
   const pending=state.scheduledMessages.filter(m=>m.scheduledAt&&Date.parse(m.scheduledAt)<=ms);if(pending.length){for(const m of pending){const recipient=state.officers.find(x=>x.id===m.to);m.deliveredAt=m.to==='all'||(recipient?.online&&!recipient.stunned)?now():null;state.messages.unshift(m);}state.scheduledMessages=state.scheduledMessages.filter(m=>!pending.includes(m));dirty=true;}
   for(const a of state.alerts.filter(x=>x.type==='sos'&&x.status==='raised'&&!x.escalated&&ms-Date.parse(x.raisedAt)>Number(state.settings.sosEscalationMinutes||2)*60000)){a.escalated=true;a.events.push({status:'escalated',at:now(),by:'System'});dirty=true;}
   const cutoff=ms-Math.max(1,Number(state.settings.retentionDays||90))*86400000;for(const o of state.officers){const before=(o.history||[]).length;o.history=(o.history||[]).filter(p=>Date.parse(p.receivedAt)>=cutoff);if(before!==o.history.length)dirty=true;}
   for(const key of ['messages','calls','recordings','alerts','traffic','telemetry','emails'])if(Array.isArray(state[key])){const before=state[key].length;state[key]=state[key].filter(x=>Date.parse(x.createdAt||x.raisedAt||x.startedAt||x.at||now())>=cutoff);if(before!==state[key].length)dirty=true;}
-  const frequency=state.settings.backupFrequency,period=frequency==='weekly'?7*86400000:86400000;if(frequency!=='manual'&&(!state.lastAutoBackup||ms-Date.parse(state.lastAutoBackup)>=period)){state.lastAutoBackup=now();makeBackup().catch(()=>{});dirty=true;}
+  const lastAutoBackupAt=Date.parse(state.lastAutoBackup||'');if(!autoBackupInProgress&&ms>=autoBackupRetryAt&&(!Number.isFinite(lastAutoBackupAt)||ms-lastAutoBackupAt>=3600000)){autoBackupInProgress=true;makeBackup().then(backup=>{state.lastAutoBackup=now();autoBackupRetryAt=0;recordDiagnostic('backup.auto.succeeded',{file:backup.file,sizeBytes:backup.size});console.log(`Hourly full-state backup created: ${backup.file} (${backup.size} bytes)`);save().catch(error=>{recordDiagnostic('backup.auto.metadata-save-failed',{message:error.message,status:error.status||null},'error');console.error('Could not persist automatic backup timestamp:',error.message);});}).catch(error=>{autoBackupRetryAt=Date.now()+300000;recordDiagnostic('backup.auto.failed',{message:error.message,status:error.status||null},'error');console.error('Hourly full-state backup failed; retrying in five minutes:',error.message);}).finally(()=>{autoBackupInProgress=false;});}
   if(dirty)save().catch(()=>{});
 },5000).unref();
 const PORT=Number(process.env.PORT||3000);
