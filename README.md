@@ -65,10 +65,10 @@ No prebuilt APK is included. This workspace has no JDK or Android SDK, so the AP
 
 ## Maps, archive and workflows
 
-- The map provides Street, Satellite and Topographic basemaps, 2D and pitched 3D perspectives, site/unit overlays, map-based geofence drawing, fit-to-units, geolocation, measurement and fullscreen. The 3D view is a pitched camera only; there is no terrain or building model layer. If external tiles fail, approximate local Sandton reference roads may be shown; they are not a substitute for real tiles.
+- The map provides Street, Satellite and Topographic basemaps, 2D and pitched 3D perspectives, site/unit overlays, map-based geofence drawing, fit-to-units, geolocation, measurement and fullscreen. The 3D view is a pitched camera only; there is no terrain or building model layer. If the primary external street tiles fail, the map tries OpenStreetMap and reports a connection issue if tiles remain unavailable. No synthetic or locally hosted road map is included.
 - TomTom flow tiles remain full-color and require a configured key and provider attribution. Traffic history is sampled near configured work sites and stored in the Supabase state record; it is not a full historical street-network feed.
 - Day Review uses the same replay time for recorded traffic and GPS fixes. It does not invent positions or readings. A date without GPS fixes will show no fabricated unit locations.
-- The app includes roster/groups, shifts, alerts and SOS, dispatch messaging, WebRTC call history, recordings, relay/telemetry simulations, reports/CSV, audit history, and Supabase-backed backups/restore.
+- The app includes roster/groups, shifts, alerts and SOS, dispatch messaging, WebRTC call history, recordings, relay/telemetry simulations, reports/CSV, audit history, and Supabase-backed backups/restore. Field-to-control calls ring connected control consoles automatically; the first controller to answer takes the call. SOS reports store the press time, last-known and subsequent GPS fixes, accuracy, unit health, and connection state; dashboard SOS actions jump to the live unit position.
 - Physical radios, telemetry outputs, SIP/PSTN, external email delivery, and hardware control require separate integrations. Current radio/relay/output controls are local simulations/configuration only.
 
 ## API notes
