@@ -21,8 +21,5 @@ alter table public.dispatch_backups enable row level security;
 revoke all on table public.dispatch_backups from public, anon, authenticated;
 grant select, insert, update, delete on table public.dispatch_backups to service_role;
 
--- Sign-up must remain disabled in Supabase Auth settings. Create the first account
--- through Auth, then grant it administrative access via app_metadata, for example:
--- update auth.users
--- set raw_app_meta_data = coalesce(raw_app_meta_data, '{}'::jsonb) || '{"dispatch_role":"admin"}'::jsonb
--- where lower(email) = lower('admin@example.com');
+-- Keep public sign-up disabled. Create the initial account through Supabase Auth;
+-- after sign-in, all authenticated Dispatch users have the same application access.

@@ -8,7 +8,7 @@
   <link rel="stylesheet" href="/vendor/maplibre/maplibre-gl.css">
   <link rel="stylesheet" href="/styles.css?v=map3d-v7">
   <link rel="stylesheet" href="/theme-cyber.css?v=cyber-v10">
-  <link rel="stylesheet" href="/theme-glass.css?v=glass-v19">
+  <link rel="stylesheet" href="/theme-glass.css?v=glass-v21">
 </head>
 <body>
 <main id="authGate" class="auth-gate" aria-labelledby="authTitle">
@@ -16,7 +16,7 @@
     <div class="dispatch-brand auth-brand"><span class="dispatch-brand-mark" aria-hidden="true">⌁</span><span class="dispatch-brand-copy"><b>Dispatch</b><small>SECURE CONTROL ROOM</small></span></div>
     <div class="auth-eyebrow">PRIVATE OPERATIONS</div>
     <h1 id="authTitle">Sign in to Dispatch</h1>
-    <p class="auth-intro">Access is limited to accounts provisioned by your administrator.</p>
+    <p class="auth-intro">Sign in with an account provisioned by a trusted operator.</p>
     <div id="authSetupNotice" class="auth-notice" role="status" hidden></div>
     <form id="loginForm" autocomplete="on">
       <label class="auth-field">Email address<input id="loginEmail" class="input" name="email" type="email" autocomplete="username" required></label>
@@ -24,7 +24,7 @@
       <div id="authError" class="auth-error" role="alert" hidden></div>
       <button id="loginButton" class="button primary auth-submit" type="submit">Sign in securely</button>
     </form>
-    <p class="auth-footnote">No public registration. Ask an administrator to create your account.</p>
+    <p class="auth-footnote">No public registration. Ask a signed-in operator to create your account.</p>
   </section>
 </main>
 <div class="app-shell" id="appShell" hidden>
@@ -74,5 +74,5 @@
   </main>
 </div>
 <div id="modalRoot"></div><div id="toastRoot" class="toast-root"></div><div id="alarmLayer" class="alarm-layer hidden"><div class="alarm-card"><div class="alarm-mark">!</div><div><b>EMERGENCY · SOS ALERT</b><span id="alarmText">Immediate response required</span></div><button id="dismissAlarm">View &amp; acknowledge →</button></div></div>
-<script src="/vendor/leaflet/leaflet.js?v=1.9.4"></script><script src="/vendor/maplibre/maplibre-gl.js?v=5.6.2"></script><script src="/diagnostics.js?v=diag-v1"></script><script src="/native-bridge.js"></script><script src="/app.js?v=map3d-v41"></script>
+<script src="/vendor/leaflet/leaflet.js?v=1.9.4"></script><script src="/vendor/maplibre/maplibre-gl.js?v=5.6.2"></script><script src="/diagnostics.js?v=diag-v1"></script><script src="/native-bridge.js"></script><script src="/app.js?v=map3d-v44"></script>
 </body></html>

@@ -1,4 +1,4 @@
-const CACHE='dispatch-shell-v54';
+const CACHE='dispatch-shell-v57';
 const FILES=['/','/styles.css','/theme-cyber.css','/theme-glass.css','/diagnostics.js','/app.js','/manifest.webmanifest','/icon.svg','/fonts/inter-latin-400.woff2','/fonts/inter-latin-500.woff2','/fonts/inter-latin-600.woff2','/fonts/inter-latin-700.woff2','/vendor/leaflet/leaflet.css','/vendor/leaflet/leaflet.js','/vendor/leaflet/images/marker-icon.png','/vendor/leaflet/images/marker-shadow.png','/vendor/maplibre/maplibre-gl.css','/vendor/maplibre/maplibre-gl.js'];
 self.addEventListener('install',e=>e.waitUntil(caches.open(CACHE).then(c=>c.addAll(FILES))));
 self.addEventListener('activate',e=>e.waitUntil((async()=>{for(const key of await caches.keys())if(key.startsWith('dispatch-shell-')&&key!==CACHE)await caches.delete(key);await self.clients.claim();})()));
