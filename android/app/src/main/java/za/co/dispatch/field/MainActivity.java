@@ -46,6 +46,7 @@ import java.util.Iterator;
 public class MainActivity extends Activity {
     private static final String PREFS = "dispatch-field";
     private static final String KEY_SERVER = "serverBase";
+    private static final String PREF_LOCATION_DENIED = "locationPermissionDenied";
     private static final String ASSET_ORIGIN = "https://appassets.androidplatform.net";
     private static final int REQUEST_LOCATION = 4101;
     private static final int REQUEST_MICROPHONE = 4102;
@@ -68,6 +69,7 @@ public class MainActivity extends Activity {
         getWindow().setStatusBarColor(Color.rgb(8, 17, 30));
         getWindow().setNavigationBarColor(Color.rgb(8, 17, 30));
         preferences = getSharedPreferences(PREFS, MODE_PRIVATE);
+        locationPermissionDenied = preferences.getBoolean(PREF_LOCATION_DENIED, false) && !hasFineLocation();
         serverBase = preferences.getString(KEY_SERVER, "");
         if (validServer(serverBase)) showApp(); else showConnectScreen();
     }
@@ -206,6 +208,7 @@ public class MainActivity extends Activity {
             public void onGeolocationPermissionsShowPrompt(String origin, GeolocationPermissions.Callback callback) {
                 runOnUiThread(() -> {
                     if (hasFineLocation()) callback.invoke(origin, true, false);
+                    else if (locationPermissionDenied) callback.invoke(origin, false, false);
                     else {
                         pendingGeoOrigin = origin;
                         pendingGeoCallback = callback;
@@ -299,6 +302,7 @@ public class MainActivity extends Activity {
         } else if (requestCode == REQUEST_LOCATION) {
             locationPermissionRequestActive = false;
             locationPermissionDenied = !hasFineLocation();
+            preferences.edit().putBoolean(PREF_LOCATION_DENIED, locationPermissionDenied).apply();
             completeLocationPermission(!locationPermissionDenied);
         }
     }
