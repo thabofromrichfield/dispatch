@@ -18,6 +18,7 @@ import android.webkit.CookieManager;
 import android.webkit.PermissionRequest;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
+import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
@@ -27,6 +28,7 @@ import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
+import android.util.Base64;
 
 import androidx.webkit.ServiceWorkerClientCompat;
 import androidx.webkit.ServiceWorkerControllerCompat;
@@ -36,6 +38,7 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
+import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
@@ -46,6 +49,7 @@ import java.util.Iterator;
 public class MainActivity extends Activity {
     private static final String PREFS = "dispatch-field";
     private static final String KEY_SERVER = "serverBase";
+    private static final String DEFAULT_SERVER = "https://dispatch-brown-five.vercel.app";
     private static final String PREF_LOCATION_DENIED = "locationPermissionDenied";
     private static final String ASSET_ORIGIN = "https://appassets.androidplatform.net";
     private static final int REQUEST_LOCATION = 4101;
@@ -70,7 +74,11 @@ public class MainActivity extends Activity {
         getWindow().setNavigationBarColor(Color.rgb(8, 17, 30));
         preferences = getSharedPreferences(PREFS, MODE_PRIVATE);
         locationPermissionDenied = preferences.getBoolean(PREF_LOCATION_DENIED, false) && !hasFineLocation();
-        serverBase = preferences.getString(KEY_SERVER, "");
+        serverBase = preferences.getString(KEY_SERVER, DEFAULT_SERVER);
+        if (serverBase == null || serverBase.trim().isEmpty()) {
+            serverBase = DEFAULT_SERVER;
+            preferences.edit().putString(KEY_SERVER, serverBase).apply();
+        }
         if (validServer(serverBase)) showApp(); else showConnectScreen();
     }
 
@@ -105,7 +113,7 @@ public class MainActivity extends Activity {
         urlInput.setSingleLine(true);
         urlInput.setTextColor(Color.WHITE);
         urlInput.setHintTextColor(Color.rgb(133, 151, 172));
-        urlInput.setHint("https://dispatch.example.com");
+        urlInput.setHint(DEFAULT_SERVER);
         urlInput.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_VARIATION_URI);
         urlInput.setText(serverBase);
         urlInput.setSelectAllOnFocus(true);
@@ -182,8 +190,10 @@ public class MainActivity extends Activity {
         webView.addJavascriptInterface(new DispatchBridge(this), "DispatchNative");
         webView.setWebViewClient(new WebViewClient() {
             @Override
-            public android.webkit.WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
-                return assetLoader.shouldInterceptRequest(request.getUrl());
+            public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
+                Uri uri = request.getUrl();
+                if (isTrafficTileRequest(uri)) return proxyTrafficTile(uri);
+                return assetLoader.shouldInterceptRequest(uri);
             }
 
             @Override
@@ -194,8 +204,10 @@ public class MainActivity extends Activity {
         });
         ServiceWorkerControllerCompat.getInstance().setServiceWorkerClient(new ServiceWorkerClientCompat() {
             @Override
-            public android.webkit.WebResourceResponse shouldInterceptRequest(WebResourceRequest request) {
-                return assetLoader.shouldInterceptRequest(request.getUrl());
+            public WebResourceResponse shouldInterceptRequest(WebResourceRequest request) {
+                Uri uri = request.getUrl();
+                if (isTrafficTileRequest(uri)) return proxyTrafficTile(uri);
+                return assetLoader.shouldInterceptRequest(uri);
             }
         });
         webView.setWebChromeClient(new WebChromeClient() {
@@ -323,6 +335,68 @@ public class MainActivity extends Activity {
         super.onDestroy();
     }
 
+    private boolean isTrafficTileRequest(Uri uri) {
+        return uri != null
+                && "appassets.androidplatform.net".equalsIgnoreCase(uri.getHost())
+                && uri.getPath() != null
+                && uri.getPath().startsWith("/api/traffic/tiles/flow/");
+    }
+
+    private WebResourceResponse proxyTrafficTile(Uri uri) {
+        HttpURLConnection connection = null;
+        try {
+            if (!validServer(serverBase)) throw new IllegalArgumentException("Dispatch server URL is not configured");
+            URL target = new URL(serverBase + uri.getPath() + (uri.getEncodedQuery() == null ? "" : "?" + uri.getEncodedQuery()));
+            connection = (HttpURLConnection) target.openConnection();
+            connection.setRequestMethod("GET");
+            connection.setConnectTimeout(15000);
+            connection.setReadTimeout(30000);
+            connection.setRequestProperty("Accept", "image/png");
+            connection.setRequestProperty("X-Dispatch-Client", "android-field");
+            String cookieHeader = CookieManager.getInstance().getCookie(serverBase);
+            if (cookieHeader != null && !cookieHeader.isEmpty()) connection.setRequestProperty("Cookie", cookieHeader);
+            int status = connection.getResponseCode();
+            for (java.util.Map.Entry<String, java.util.List<String>> entry : connection.getHeaderFields().entrySet()) {
+                if (entry.getKey() != null && "set-cookie".equalsIgnoreCase(entry.getKey()) && entry.getValue() != null) {
+                    for (String cookie : entry.getValue()) CookieManager.getInstance().setCookie(serverBase, cookie);
+                }
+            }
+            CookieManager.getInstance().flush();
+            InputStream stream = status >= 400 ? connection.getErrorStream() : connection.getInputStream();
+            byte[] bytes = stream == null ? new byte[0] : readBytes(stream);
+            java.util.Map<String, String> headers = new java.util.HashMap<>();
+            String contentType = connection.getContentType();
+            if (contentType != null) headers.put("Content-Type", contentType);
+            String mimeType = "image/png", encoding = null;
+            if (contentType != null) {
+                String[] typeParts = contentType.split(";", 2);
+                mimeType = typeParts[0].trim();
+                if (typeParts.length > 1 && typeParts[1].toLowerCase(java.util.Locale.ROOT).contains("charset="))
+                    encoding = typeParts[1].substring(typeParts[1].toLowerCase(java.util.Locale.ROOT).indexOf("charset=") + 8).trim();
+            }
+            String cacheControl = connection.getHeaderField("Cache-Control");
+            if (cacheControl != null) headers.put("Cache-Control", cacheControl);
+            return new WebResourceResponse(mimeType, encoding, status,
+                    status >= 400 ? "Traffic tile request failed" : "OK", headers, new ByteArrayInputStream(bytes));
+        } catch (Exception error) {
+            byte[] message = ("Traffic tile proxy failed: " + error.getMessage()).getBytes(StandardCharsets.UTF_8);
+            java.util.Map<String, String> headers = new java.util.HashMap<>();
+            headers.put("Content-Type", "text/plain; charset=utf-8");
+            return new WebResourceResponse("text/plain", "UTF-8", 502, "Bad Gateway", headers, new ByteArrayInputStream(message));
+        } finally {
+            if (connection != null) connection.disconnect();
+        }
+    }
+
+    private static byte[] readBytes(InputStream stream) throws Exception {
+        try (InputStream in = stream; ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+            byte[] buffer = new byte[8192];
+            int count;
+            while ((count = in.read(buffer)) != -1) out.write(buffer, 0, count);
+            return out.toByteArray();
+        }
+    }
+
     private Button button(String text, boolean primary) {
         Button button = new Button(this);
         button.setText(text);
@@ -371,8 +445,8 @@ public class MainActivity extends Activity {
                 connection.setRequestMethod(verb);
                 String cookieHeader = CookieManager.getInstance().getCookie(serverBase);
                 if (cookieHeader != null && !cookieHeader.isEmpty()) connection.setRequestProperty("Cookie", cookieHeader);
-                connection.setConnectTimeout(8000);
-                connection.setReadTimeout(20000);
+                connection.setConnectTimeout(15000);
+                connection.setReadTimeout(45000);
                 connection.setRequestProperty("X-Dispatch-Client", "android-field");
                 JSONObject requestHeaders = new JSONObject(headersJson == null ? "{}" : headersJson);
                 Iterator<String> names = requestHeaders.keys();
@@ -394,13 +468,14 @@ public class MainActivity extends Activity {
                 }
                 CookieManager.getInstance().flush();
                 InputStream stream = status >= 400 ? connection.getErrorStream() : connection.getInputStream();
-                String responseBody = stream == null ? "" : readUtf8(stream);
-                result.put("status", status);
-                result.put("body", responseBody);
-                JSONObject responseHeaders = new JSONObject();
                 String contentType = connection.getContentType();
+                boolean binary = contentType != null && contentType.toLowerCase(java.util.Locale.ROOT).startsWith("image/");
+                result.put("status", status);
+                if (binary) result.put("bodyBase64", Base64.encodeToString(stream == null ? new byte[0] : readBytes(stream), Base64.NO_WRAP));
+                else result.put("body", stream == null ? "" : readUtf8(stream));
+                JSONObject responseHeaders = new JSONObject();
                 if (contentType != null) responseHeaders.put("Content-Type", contentType);
-                responseHeaders.put("Cache-Control", "no-store");
+                responseHeaders.put("Cache-Control", connection.getHeaderField("Cache-Control") == null ? "no-store" : connection.getHeaderField("Cache-Control"));
                 result.put("headers", responseHeaders);
             } catch (Exception error) {
                 try {

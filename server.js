@@ -49,7 +49,7 @@ function seed() {
     groups: ['North Sector','East Sector','West Sector','All units'], relays:[{id:'relay-main',name:'Johannesburg Control Node',host:'127.0.0.1',status:'configured',mode:'primary',lastCheck:null,latencyMs:null}], regions:[], scheduledMessages:[], callPatches:[], telemetry:[], emails:[], simulation:{active:false,startedAt:null,stoppedAt:null,units:{}}, updatedAt:date
   };
 }
-let cloudReady=false,cloudInitError=null,cloudWriteQueue=Promise.resolve(),cloudRecoveryTimer=null,cloudRecoveryDelay=5000,volatileCallIds=new Set(),vercelRequestQueue=Promise.resolve();
+let cloudReady=false,cloudInitError=null,cloudWriteQueue=Promise.resolve(),cloudRecoveryTimer=null,cloudRecoveryDelay=5000,volatileCallIds=new Set(),vercelRequestQueue=Promise.resolve(),cloudInitLastAttemptAt=0;
 function cloudHeaders(extra={}){return {'apikey':SUPABASE_SERVICE_ROLE_KEY,'Authorization':`Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,'Content-Type':'application/json',...extra};}
 async function cloudRequest(path,options={}){
   if(!supabaseConfigured||!supabaseBaseValid)throw Object.assign(new Error('Supabase server configuration is missing or invalid'),{status:503});
@@ -74,6 +74,7 @@ async function persistCloudSnapshot(snapshot){
   throw lastError;
 }
 async function initializeCloud(){
+  cloudInitLastAttemptAt=Date.now();
   if(!supabaseConfigured||!supabaseBaseValid){cloudInitError='Supabase server configuration is missing or invalid';return false;}
   try{
     const rows=await cloudRequest('/rest/v1/dispatch_state?select=payload&id=eq.1');
@@ -149,7 +150,7 @@ const RTC_PEER_TTL_MS=15000,presencePersistedAt=new Map(),rtcPeers=new Map(),rtc
 function audit(action, target = '', actor = 'Local console') { state.audit.unshift({id:id('audit'), at:now(), actor, action, target}); state.audit = state.audit.slice(0, 3000); }
 function safeOfficer(o) { const { history, ...rest } = o; return {...rest, history: history || []}; }
 function trafficApiKey() { return TOMTOM_API_KEY || String(state.settings.trafficKey || '').trim(); }
-function clientStateForAuthenticatedUser() { const body={...state,officers:state.officers.map(safeOfficer)}; body.settings={...state.settings,trafficKeyConfigured:Boolean(trafficApiKey())}; return body; }
+function clientStateForAuthenticatedUser() { const body={...state,officers:state.officers.map(safeOfficer)}; body.settings={...state.settings,trafficKey:'',trafficKeyConfigured:Boolean(trafficApiKey())}; return body; }
 
 function touchOfficerPresence(officerId){const officer=state.officers.find(x=>x.id===officerId);if(!officer)return false;const atMs=Date.now(),lastSeenMs=Date.parse(officer.lastSeen||''),wasOnline=Boolean(officer.online),stale=!Number.isFinite(lastSeenMs)||atMs-lastSeenMs>=RTC_PEER_TTL_MS;officer.online=true;if(!Number.isFinite(lastSeenMs)||atMs-lastSeenMs>1000)officer.lastSeen=now();let deliveredQueuedMessage=false;for(const message of state.messages){if(!message.deliveredAt&&!message.scheduledAt&&(message.to===officer.id||(message.to==='all'&&message.group===officer.group))){message.deliveredAt=now();deliveredQueuedMessage=true;}}const lastPersisted=presencePersistedAt.get(officer.id)||0;if(!wasOnline||stale||deliveredQueuedMessage||atMs-lastPersisted>=RTC_PEER_TTL_MS){presencePersistedAt.set(officer.id,atMs);save().catch(error=>recordDiagnostic('presence.persist.failed',{officerId:officer.id,status:error.status||null,message:error.message},'error'));}return true;}
 
@@ -310,7 +311,7 @@ function action(b) {
     case 'patch-save': {const p={id:id('patch'),name:b.name||'Audio patch',members:b.members||[],active:true,createdAt:at};state.callPatches.push(p);audit('Audio patch preset saved',p.name,actor);return {};}
     case 'patch-stop': {const p=state.callPatches.find(x=>x.id===b.id);if(p)p.active=false;audit('Audio patch removed',b.id,actor);return {};}
     case 'telemetry': {if(!o)throw Error('Choose a terminal');const t={id:id('tel'),officerId:o.id,point:b.point||'Auxiliary output 1',value:b.value??true,at};state.telemetry.unshift(t);o.outputs ||= {};o.outputs[t.point]=t.value;audit('Simulated telemetry output changed',`${o.callSign} · ${t.point} · ${t.value?'ON':'OFF'}`,actor);return {output:t};}
-    case 'settings': {Object.assign(state.settings,b.settings||{});state.settings.backupFrequency='hourly';delete state.settings.mapTileUrl;if(Object.hasOwn(b.settings||{},'mapProvider')){state.settings.mapProvider=['Esri World Street Map','OpenStreetMap'].includes(b.settings.mapProvider)?b.settings.mapProvider:'Esri World Street Map';state.settings.mapProviderUserSet=true;}audit('System settings changed','Settings',actor);return {}; }
+    case 'settings': {const incoming={...(b.settings||{})};if(!String(incoming.trafficKey||'').trim())delete incoming.trafficKey;Object.assign(state.settings,incoming);state.settings.backupFrequency='hourly';delete state.settings.mapTileUrl;if(Object.hasOwn(b.settings||{},'mapProvider')){state.settings.mapProvider=['Esri World Street Map','OpenStreetMap'].includes(b.settings.mapProvider)?b.settings.mapProvider:'Esri World Street Map';state.settings.mapProviderUserSet=true;}audit('System settings changed','Settings',actor);return {}; }
     case 'audit': audit(b.action||'Console action',b.target||'',actor);return {};
     case 'import': {const list=b.officers||[];let added=0;for(const item of list){if(!item.name)continue;const dup=state.officers.some(x=>x.callSign===item.callSign);if(dup)continue;action({type:'officer-save',officer:item,actor});added++;}audit('Batch import',`${added} officers`);return {added};}
     case 'simulation-start': {if(state.simulation?.active)return {started:false,active:true};const units=state.officers.filter(x=>x.shiftId&&x.tracking&&!x.stunned);if(!units.length)throw Error('Clock in at least one active unit before starting the route simulation');const tracks={};units.forEach((person,index)=>{const route=makeSimulationRoute(person,index);if(route.length>1)tracks[person.id]={route,leg:0,progress:0,sequence:0,seed:index+1};});if(!Object.keys(tracks).length)throw Error('No work site is available for the route simulation');state.simulation={active:true,startedAt:at,stoppedAt:null,lastTick:null,units:tracks};audit('Route simulation started',`${units.length} active units`,actor);return {started:true,units:units.length};}
@@ -396,7 +397,7 @@ if(IS_VERCEL){
   async function processVercelRequest(req,res){
     let lockToken=null;const requestUrl=new URL(req.url,'http://localhost'),isApi=requestUrl.pathname.startsWith('/api/');
     try{
-      if(isApi){await cloudInitialization;if(supabaseConfigured&&supabaseBaseValid&&!cloudReady)await initializeCloud();}
+      if(isApi){await cloudInitialization;if(supabaseConfigured&&supabaseBaseValid&&!cloudReady&&Date.now()-cloudInitLastAttemptAt>=30000)await initializeCloud();}
       const publicAuth=['/api/auth/status','/api/auth/login','/api/auth/logout','/api/auth/me','/api/auth/password'].includes(requestUrl.pathname),needsCloudState=isApi&&!publicAuth;
       if(needsCloudState&&cloudReady){
         if(req.method==='POST'&&requestUrl.pathname!=='/api/rtc/signal'){
