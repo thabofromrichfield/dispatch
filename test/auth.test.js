@@ -223,6 +223,19 @@ test('authentication against a Supabase stub', async (t) => {
     assert.equal(afterRefresh.status, 200);
   });
 
+  await t.test('traffic tiles accept the short-lived token instead of a session lookup', async () => {
+    const jar = jarFrom(await login(operator.email, operator.password));
+    const state = await (await fetch(`${baseUrl}/api/state`, { headers: { cookie: cookieHeader(jar) } })).json();
+    const token = state.settings.tileToken;
+    assert.ok(token, 'state response carries a tile token');
+
+    const tile = (query) => fetch(`${baseUrl}/api/traffic/tiles/flow/relative/10/1/2.png${query}`);
+    // No TomTom key is configured in the test env, so an authorised request stops at 409.
+    assert.equal((await tile(`?t=${encodeURIComponent(token)}`)).status, 409);
+    assert.equal((await tile('')).status, 401);
+    assert.equal((await tile('?t=1700000000000.deadbeefdeadbeefdeadbeefdeadbeef')).status, 401);
+  });
+
   await t.test('field account is limited to its own unit', async () => {
     const jar = jarFrom(await login(fieldUser.email, fieldUser.password));
     const fieldState = await fetch(`${baseUrl}/api/field/state?scope=unit&officerId=officer-01`, {
