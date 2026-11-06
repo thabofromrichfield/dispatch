@@ -10,6 +10,10 @@ A live dispatch system with a lightweight operations dashboard and field-only An
 
 After cloning the published branch, open the `dispatch` folder in VS Code. Copy `.env.example` to `.env`, fill in your **rotated** Supabase project URL, anon key, and service-role key, then run `supabase/schema.sql` in the Supabase SQL Editor. In VS Code, press **F5** and choose **Dispatch — local Supabase backend**, or run **Terminal → Run Task → Dispatch: start locally**. The local launch configuration binds to `127.0.0.1:3000`; it does not expose the development server to your LAN. The `.env` file is ignored by Git and must never be committed. For local traffic demos, set `TOMTOM_API_KEY` in that local `.env`; the server uses it for proxied TomTom flow/tile requests without requiring a Dispatch account. The environment key takes precedence over a key stored in Supabase settings and is never returned to the browser. Do not paste it into tracked source files.
 
+## Tests and CI
+
+Run `npm test` to verify the local server's unauthenticated startup/API behavior, JavaScript syntax, and parity between the maintained Android field-app sources and the packaged WebView assets. These smoke tests do not replace authenticated Supabase, browser/device, WebRTC, or production integration testing. GitHub Actions runs these tests and builds the Android APK remotely on pushes and pull requests; no local Android SDK is needed for CI validation.
+
 ## Supabase setup (required)
 
 1. In Supabase, run the current [`supabase/schema.sql`](supabase/schema.sql) in the SQL Editor before deploying this version. It migrates legacy GPS history into an indexed archive, creates unit identity/state tables, enables per-unit RLS, and installs the compact state/GPS save functions. The dashboard shows whether this migration is ready. Do not skip it: old history is preserved until it is applied.
@@ -18,7 +22,7 @@ After cloning the published branch, open the `dispatch` folder in VS Code. Copy 
 4. Create the first control-room operator in Supabase Authentication and confirm the email. After sign-in, use Units → Add unit to create a unit and (optionally) its field login in one flow. Field accounts are linked to one unit and do not receive operator access.
 5. Copy `.env.example` to `.env` (ignored by Git) and fill in the **rotated** project URL, anon key, and service-role key. Never put the service-role key in frontend code. The app does not need the Supabase JWT signing secret.
 6. Use HTTPS for sign-in outside localhost. Terminate TLS at a trusted reverse proxy and set `DISPATCH_TRUST_PROXY=true` only when the proxy is the trusted entry point. For local-only HTTP development, explicitly set `DISPATCH_COOKIE_SECURE=false`; do not use that setting on a network-facing server.
-7. Start the server with Node.js 20 or newer:
+7. Start the server with Node.js 22 or newer:
 
    ```sh
    npm start
@@ -64,7 +68,7 @@ cd android
 ./gradlew :app:assembleDebug
 ```
 
-No prebuilt APK is included. This workspace has no JDK or Android SDK, so the APK has not been compiled here.
+Build outputs are not committed to the repository; download the latest published APK from the link at the top of this README. GitHub Actions builds and verifies APKs remotely. Local builds require JDK 17 and Android SDK Platform 35.
 
 ## Maps, archive and workflows
 

@@ -4,5 +4,5 @@
   "private": true,
   "description": "Live dispatch operations and field-unit coordination",
   "scripts": { "start": "node server.js", "dev": "node server.js", "test": "node --test test/*.test.js" },
-  "engines": { "node": ">=20 <27" }
+  "engines": { "node": ">=22 <27" }
 }
