@@ -29,8 +29,8 @@ function seed() {
   return {
     version: 1,
     locationEventIds: [],
-    lastAutoBackup: date,
-    settings: { company: 'Metro Traffic Operations', timezone: 'Africa/Johannesburg', absenceMinutes: 60, offlineMinutes: 5, geofenceReadings: 2, gpsAccuracy: 50, locationInterval: 15, retentionDays: 90, sosEscalationMinutes: 2, speedLimit: 90, trafficProvider: 'tomtom', trafficKey: '', trafficEnabled: false, mapProvider: 'Esri World Street Map', mapTileUrl: '/tiles/{z}/{x}/{y}.png', smtpHost: '', emailFrom: '', backupFrequency: 'daily', backupRetention: 14, supervisor: '', soundEnabled: true },
+    lastAutoBackup: null,
+    settings: { company: 'Metro Traffic Operations', timezone: 'Africa/Johannesburg', absenceMinutes: 60, offlineMinutes: 5, geofenceReadings: 2, gpsAccuracy: 50, locationInterval: 15, retentionDays: 90, sosEscalationMinutes: 2, speedLimit: 90, trafficProvider: 'tomtom', trafficKey: '', trafficEnabled: false, mapProvider: 'Esri World Street Map', mapTileUrl: '/tiles/{z}/{x}/{y}.png', smtpHost: '', emailFrom: '', backupFrequency: 'hourly', backupRetention: 14, supervisor: '', soundEnabled: true },
     sites: [
       { id: 'site-sandton', name: 'Sandton Drive & Rivonia Rd', areaType: 'work', color: '#e0a12a', coordinates: [[-26.1038,28.0535],[-26.1038,28.0592],[-26.108,28.0592],[-26.108,28.0535]], assigned: ['officer-01','officer-02'], tolerance: 40 },
       { id: 'site-m1', name: 'M1 Grayston Interchange', areaType: 'work', color: '#648b73', coordinates: [[-26.0955,28.064],[-26.0955,28.070],[-26.1005,28.070],[-26.1005,28.064]], assigned: ['officer-03'], tolerance: 40 },
@@ -108,6 +108,10 @@ function save(){
 let state;
 try { state = JSON.parse(fs.readFileSync(DB, 'utf8')); } catch { state = seed(); save(); }
 state.locationEventIds ||= [];
+state.settings ||= {};
+const backupFrequencyMigrated=state.settings.backupFrequency!=='hourly';
+state.settings.backupFrequency='hourly';
+if(backupFrequencyMigrated)save().catch(error=>console.error('Could not persist hourly backup schedule:',error.message));
 state.simulation ||= {active:false,startedAt:null,stoppedAt:null,units:{}};
 state.simulation.units ||= {};
 state.relays ||= [];
@@ -267,7 +271,7 @@ function action(b) {
     case 'patch-stop': {const p=state.callPatches.find(x=>x.id===b.id);if(p)p.active=false;audit('Audio patch removed',b.id,actor);return {};}
     case 'telemetry': {if(!o)throw Error('Choose a terminal');const t={id:id('tel'),officerId:o.id,point:b.point||'Auxiliary output 1',value:b.value??true,at};state.telemetry.unshift(t);o.outputs ||= {};o.outputs[t.point]=t.value;audit('Simulated telemetry output changed',`${o.callSign} · ${t.point} · ${t.value?'ON':'OFF'}`,actor);return {output:t};}
     case 'email': {const e={id:id('email'),to:b.to,subject:b.subject||'Dispatch message',body:b.body,at,status:'local-only'};state.emails.unshift(e);audit('Email saved to local outbox',e.to,actor);return {email:e.id};}
-    case 'settings': {Object.assign(state.settings,b.settings||{});if(Object.hasOwn(b.settings||{},'mapProvider'))state.settings.mapProviderUserSet=true;audit('System settings changed','Settings',actor);return {}; }
+    case 'settings': {Object.assign(state.settings,b.settings||{});state.settings.backupFrequency='hourly';if(Object.hasOwn(b.settings||{},'mapProvider'))state.settings.mapProviderUserSet=true;audit('System settings changed','Settings',actor);return {}; }
     case 'audit': audit(b.action||'Console action',b.target||'',actor);return {};
     case 'import': {const list=b.officers||[];let added=0;for(const item of list){if(!item.name)continue;const dup=state.officers.some(x=>x.callSign===item.callSign);if(dup)continue;action({type:'officer-save',officer:item,actor});added++;}audit('Batch import',`${added} officers`);return {added};}
     case 'simulation-start': {if(state.simulation?.active)return {started:false,active:true};const units=state.officers.filter(x=>x.shiftId&&x.tracking&&!x.stunned);if(!units.length)throw Error('Clock in at least one active unit before starting the route simulation');const tracks={};units.forEach((person,index)=>{const route=makeSimulationRoute(person,index);if(route.length>1)tracks[person.id]={route,leg:0,progress:0,sequence:0,seed:index+1};});if(!Object.keys(tracks).length)throw Error('No work site is available for the route simulation');state.simulation={active:true,startedAt:at,stoppedAt:null,lastTick:null,units:tracks};audit('Route simulation started',`${units.length} active units`,actor);return {started:true,units:units.length};}
@@ -335,13 +339,14 @@ async function handleAuthApi(req,res,url){
 }
 
 // Background rules: one-hour assignment warning and stale/offline state. Server timestamps are authoritative.
+let autoBackupInProgress=false,autoBackupRetryAt=0;
 setInterval(()=>{let dirty=false;const ms=Date.now();if(tickSimulation())dirty=true;for(const o of state.officers){if(o.online&&o.lastSeen&&ms-Date.parse(o.lastSeen)>Number(state.settings.offlineMinutes||5)*60000){o.online=false;raiseAlert('offline','Terminal offline',`${o.callSign} · last seen ${o.lastSeen}`,o,null);dirty=true;}if(o.shiftId&&o.status==='en-route'&&o.clockedInAt&&ms-Date.parse(o.clockedInAt)>Number(state.settings.absenceMinutes||60)*60000){const before=state.alerts.length;raiseAbsence(o,state.sites.find(s=>s.id===o.siteId)||{});dirty ||= state.alerts.length!==before;}}
   for(const m of state.messages){const recipient=state.officers.find(x=>x.id===m.to);if(!m.deliveredAt&&recipient?.online&&!recipient.stunned){m.deliveredAt=now();dirty=true;}}
   const pending=state.scheduledMessages.filter(m=>m.scheduledAt&&Date.parse(m.scheduledAt)<=ms);if(pending.length){for(const m of pending){const recipient=state.officers.find(x=>x.id===m.to);m.deliveredAt=m.to==='all'||(recipient?.online&&!recipient.stunned)?now():null;state.messages.unshift(m);}state.scheduledMessages=state.scheduledMessages.filter(m=>!pending.includes(m));dirty=true;}
   for(const a of state.alerts.filter(x=>x.type==='sos'&&x.status==='raised'&&!x.escalated&&ms-Date.parse(x.raisedAt)>Number(state.settings.sosEscalationMinutes||2)*60000)){a.escalated=true;a.events.push({status:'escalated',at:now(),by:'System'});dirty=true;}
   const cutoff=ms-Math.max(1,Number(state.settings.retentionDays||90))*86400000;for(const o of state.officers){const before=(o.history||[]).length;o.history=(o.history||[]).filter(p=>Date.parse(p.receivedAt)>=cutoff);if(before!==o.history.length)dirty=true;}
   for(const key of ['messages','calls','recordings','alerts','traffic','telemetry','emails'])if(Array.isArray(state[key])){const before=state[key].length;state[key]=state[key].filter(x=>Date.parse(x.createdAt||x.raisedAt||x.startedAt||x.at||now())>=cutoff);if(before!==state[key].length)dirty=true;}
-  const frequency=state.settings.backupFrequency,period=frequency==='weekly'?7*86400000:86400000;if(frequency!=='manual'&&(!state.lastAutoBackup||ms-Date.parse(state.lastAutoBackup)>=period)){state.lastAutoBackup=now();makeBackup().catch(()=>{});dirty=true;}
+  const lastAutoBackupAt=Date.parse(state.lastAutoBackup||'');if(!autoBackupInProgress&&ms>=autoBackupRetryAt&&(!Number.isFinite(lastAutoBackupAt)||ms-lastAutoBackupAt>=3600000)){autoBackupInProgress=true;makeBackup().then(backup=>{state.lastAutoBackup=now();autoBackupRetryAt=0;recordDiagnostic('backup.auto.succeeded',{file:backup.file,sizeBytes:backup.size});console.log(`Hourly full-state backup created: ${backup.file} (${backup.size} bytes)`);save().catch(error=>{recordDiagnostic('backup.auto.metadata-save-failed',{message:error.message,status:error.status||null},'error');console.error('Could not persist automatic backup timestamp:',error.message);});}).catch(error=>{autoBackupRetryAt=Date.now()+300000;recordDiagnostic('backup.auto.failed',{message:error.message,status:error.status||null},'error');console.error('Hourly full-state backup failed; retrying in five minutes:',error.message);}).finally(()=>{autoBackupInProgress=false;});}
   if(dirty)save().catch(()=>{});
 },5000).unref();
 const PORT=Number(process.env.PORT||3000);
