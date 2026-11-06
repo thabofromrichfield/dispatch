@@ -1,5 +1,41 @@
-const CACHE='dispatch-shell-v59';
-const FILES=['/','/styles.css','/theme-cyber.css','/theme-glass.css','/diagnostics.js','/app.js','/manifest.webmanifest','/icon.svg','/fonts/inter-latin-400.woff2','/fonts/inter-latin-500.woff2','/fonts/inter-latin-600.woff2','/fonts/inter-latin-700.woff2','/vendor/leaflet/leaflet.css','/vendor/leaflet/leaflet.js','/vendor/leaflet/images/marker-icon.png','/vendor/leaflet/images/marker-shadow.png',];
-self.addEventListener('install',e=>e.waitUntil(caches.open(CACHE).then(c=>c.addAll(FILES))));
-self.addEventListener('activate',e=>e.waitUntil((async()=>{for(const key of await caches.keys())if(key.startsWith('dispatch-shell-')&&key!==CACHE)await caches.delete(key);await self.clients.claim();})()));
-self.addEventListener('fetch',e=>{const u=new URL(e.request.url);if(u.origin!==location.origin||u.pathname.startsWith('/api/'))return;e.respondWith(fetch(e.request).then(r=>{if(r.ok)caches.open(CACHE).then(c=>c.put(e.request,r.clone()));return r;}).catch(()=>caches.match(e.request,{ignoreSearch:true}).then(r=>r||caches.match('/'))));});
+const CACHE = 'dispatch-shell-v59';
+const FILES = [
+  '/',
+  '/styles.css',
+  '/theme-cyber.css',
+  '/theme-glass.css',
+  '/diagnostics.js',
+  '/app.js',
+  '/manifest.webmanifest',
+  '/icon.svg',
+  '/fonts/inter-latin-400.woff2',
+  '/fonts/inter-latin-500.woff2',
+  '/fonts/inter-latin-600.woff2',
+  '/fonts/inter-latin-700.woff2',
+  '/vendor/leaflet/leaflet.css',
+  '/vendor/leaflet/leaflet.js',
+  '/vendor/leaflet/images/marker-icon.png',
+  '/vendor/leaflet/images/marker-shadow.png',
+];
+self.addEventListener('install', (e) => e.waitUntil(caches.open(CACHE).then((c) => c.addAll(FILES))));
+self.addEventListener('activate', (e) =>
+  e.waitUntil(
+    (async () => {
+      for (const key of await caches.keys())
+        if (key.startsWith('dispatch-shell-') && key !== CACHE) await caches.delete(key);
+      await self.clients.claim();
+    })(),
+  ),
+);
+self.addEventListener('fetch', (e) => {
+  const u = new URL(e.request.url);
+  if (u.origin !== location.origin || u.pathname.startsWith('/api/')) return;
+  e.respondWith(
+    fetch(e.request)
+      .then((r) => {
+        if (r.ok) caches.open(CACHE).then((c) => c.put(e.request, r.clone()));
+        return r;
+      })
+      .catch(() => caches.match(e.request, { ignoreSearch: true }).then((r) => r || caches.match('/'))),
+  );
+});
