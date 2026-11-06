@@ -1,5 +1,9 @@
 # Dispatch Control Room
 
+## [⬇ Download the Android Field App](https://github.com/thabofromrichfield/dispatch/releases/latest/download/Dispatch-Field.apk)
+
+Field-only phone app: background GPS, online/offline, SOS, Dispatch messages, and live voice. The APK does not contain the control-room console.
+
 A locally hosted dispatch system with a full-width operations map and an installable field view. Operational records are persisted through the Node server to Supabase Postgres; authentication is handled by Supabase Auth. The browser never receives the Supabase service-role key. Public registration is not part of the app: create the first account in Supabase Auth, then any signed-in operator can provision additional accounts. All authenticated users have equal access; there are no Dispatch administrator roles.
 
 ## Open and run in VS Code
@@ -38,7 +42,7 @@ The existing system state—including roster, sites, alerts, messages, call reco
 
 All `/api/*` operations other than the minimal auth status/login/logout routes require a verified Supabase session. Session tokens are held in HttpOnly, SameSite cookies; login attempts are rate-limited; sign-up is not exposed; all authenticated users have the same operational, account-management, and backup/restore permissions; there is no application role hierarchy. HTTPS is required by default for non-local sign-in. Keep the Node service behind a trusted TLS proxy and firewall; do not expose the service-role key or an unprotected port. The Supabase service-role key bypasses RLS, so keep it only in server-side environment variables (the ignored local `.env` file or the Vercel project's protected Environment Variables).
 
-The app persists call/session records and saved recordings; live WebRTC audio is still an ephemeral peer-to-peer stream and is not itself written to the database unless a local microphone recording is explicitly saved. Basemap tiles are fetched from their map providers, not stored in Supabase. In the browser client, TomTom flow samples and raster traffic tiles are proxied through the authenticated Dispatch server, so the TomTom key is not placed in browser traffic-tile URLs. The Android WebView continues to request TomTom raster tiles directly because its app-assets origin cannot use the browser's same-origin tile proxy.
+The app persists call/session records and saved recordings; live WebRTC audio is still an ephemeral peer-to-peer stream and is not itself written to the database unless a local microphone recording is explicitly saved. Basemap tiles are fetched from their map providers, not stored in Supabase. In the browser client, TomTom flow samples and raster traffic tiles are proxied through the authenticated Dispatch server, so the TomTom key is not placed in browser traffic-tile URLs. The Android field APK does not include maps or traffic tiles.
 
 ## Exercise the system
 
