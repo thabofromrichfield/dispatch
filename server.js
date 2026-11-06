@@ -2554,8 +2554,89 @@ function originAllowed(req) {
     return false;
   }
 }
+// Probe the Supabase pieces the sign-in flow depends on, so a broken deployment says which
+// layer failed instead of a generic "storage is not ready". Cached for 15s; booleans only.
+let supabaseHealthCache = { at: 0, value: null };
+async function probeSupabase(path, headers) {
+  try {
+    const response = await fetch(`${SUPABASE_URL}${path}`, {
+      headers,
+      signal: AbortSignal.timeout(2500),
+    });
+    const text = await response.text();
+    let data = null;
+    try {
+      data = text ? JSON.parse(text) : null;
+    } catch {}
+    return { ok: response.ok, status: response.status, data };
+  } catch (error) {
+    return { ok: false, status: 0, error };
+  }
+}
+async function supabaseHealth({ force = false } = {}) {
+  if (!supabaseConfigured || !supabaseBaseValid) return null;
+  if (!force && supabaseHealthCache.value && Date.now() - supabaseHealthCache.at < 15000)
+    return supabaseHealthCache.value;
+  const [settings, stateRow, adminUsers] = await Promise.all([
+    probeSupabase('/auth/v1/settings', { apikey: SUPABASE_ANON_KEY }),
+    probeSupabase('/rest/v1/dispatch_state?select=id&id=eq.1', cloudHeaders()),
+    probeSupabase('/auth/v1/admin/users?page=1&per_page=1', cloudHeaders()),
+  ]);
+  const value = {
+    auth: settings.ok,
+    database: stateRow.ok,
+    serviceRole: adminUsers.ok,
+    stateRow: stateRow.ok && Array.isArray(stateRow.data) && stateRow.data.length > 0,
+    unitSchema: unitSchemaReady,
+    signupDisabled: settings.ok ? settings.data?.disable_signup !== false : null,
+  };
+  supabaseHealthCache = { at: Date.now(), value };
+  return value;
+}
+function startupMessage(checks) {
+  if (!supabaseConfigured || !supabaseBaseValid)
+    return 'Server credentials are missing or the Supabase URL is invalid. Set SUPABASE_URL, SUPABASE_ANON_KEY and SUPABASE_SERVICE_ROLE_KEY.';
+  if (checks && !checks.auth)
+    return 'Supabase Auth is unreachable from the server. Check the project URL, the anon key, and that the Supabase project is not paused.';
+  if (checks && !checks.database)
+    return 'The Supabase database rejected the server request. Check the service-role key and that the project is not paused.';
+  if (checks && !checks.serviceRole)
+    return 'The service-role key was rejected. SUPABASE_SERVICE_ROLE_KEY must be the service_role secret key, not the anon key.';
+  if (checks && !checks.stateRow)
+    return 'The dispatch_state row is missing. Run supabase/schema.sql in the Supabase SQL editor.';
+  if (!unitSchemaReady)
+    return 'The unit tables are missing. Run the current supabase/schema.sql in the Supabase SQL editor.';
+  if (checks?.signupDisabled === false)
+    return 'Public sign-up is enabled in Supabase Auth. Disable "Allow new users to sign up" in Authentication → Providers → Email.';
+  if (!cloudReady) return cloudInitError || 'Supabase storage is not ready. Check the database schema and connection.';
+  return null;
+}
+
+// Behind Vercel or a trusted proxy every request shares the proxy's socket address, so keying
+// the limiter on remoteAddress locks all operators out after 12 failures. Use the forwarded
+// client IP there, and the socket address everywhere else so it cannot be spoofed.
+function clientKey(req) {
+  const forwarded = req.headers['x-forwarded-for'];
+  const trustedProxy = IS_VERCEL || String(process.env.DISPATCH_TRUST_PROXY || '').toLowerCase() === 'true';
+  if (trustedProxy && typeof forwarded === 'string' && forwarded.trim()) return forwarded.split(',')[0].trim();
+  return req.socket.remoteAddress || 'unknown';
+}
+function loginFailure(error) {
+  const code = String(error.data?.error_code || error.data?.error || '').toLowerCase();
+  if (error.status === 429)
+    return { status: 429, message: 'Too many sign-in attempts. Wait 15 minutes and try again.' };
+  if (code.includes('email_not_confirmed'))
+    return {
+      status: 403,
+      message:
+        'This email address is not confirmed. Confirm it in Supabase → Authentication → Users, then sign in again.',
+    };
+  if (error.status === 400 || error.status === 401 || code.includes('invalid'))
+    return { status: 401, message: 'Email or password is incorrect.' };
+  return { status: 503, message: 'Supabase Auth did not respond. Check the project URL and keys.' };
+}
 function loginRateLimited(req) {
-  const key = req.socket.remoteAddress || 'unknown',
+  const key = clientKey(req),
     entry = loginAttempts.get(key) || { count: 0, reset: Date.now() + 15 * 60 * 1000 };
   if (entry.reset < Date.now()) {
     entry.count = 0;
@@ -2566,7 +2647,8 @@ function loginRateLimited(req) {
   return entry.count > 12;
 }
 async function handleAuthApi(req, res, url) {
-  if (url.pathname === '/api/auth/status' && req.method === 'GET')
+  if (url.pathname === '/api/auth/status' && req.method === 'GET') {
+    const checks = await supabaseHealth({ force: url.searchParams.get('refresh') === '1' });
     return send(
       res,
       200,
@@ -2574,15 +2656,12 @@ async function handleAuthApi(req, res, url) {
         configured: supabaseConfigured && supabaseBaseValid,
         ready: cloudReady,
         unitSchemaReady,
-        message:
-          !supabaseConfigured || !supabaseBaseValid
-            ? 'Server credentials are not configured.'
-            : cloudReady
-              ? null
-              : cloudInitError || 'Supabase schema or connection needs attention.',
+        checks,
+        message: startupMessage(checks),
       }),
       'application/json; charset=utf-8',
     );
+  }
   if (!originAllowed(req))
     return send(res, 403, JSON.stringify({ error: 'Request origin rejected' }), 'application/json; charset=utf-8');
   if (url.pathname === '/api/auth/login' && req.method === 'POST') {
@@ -2632,7 +2711,7 @@ async function handleAuthApi(req, res, url) {
         throw Object.assign(new Error('Sign-in failed.'), { status: 401 });
       const user = await resolveAuthUser(session.user, session.access_token);
       writeSessionCookies(req, res, session);
-      loginAttempts.delete(req.socket.remoteAddress || 'unknown');
+      loginAttempts.delete(clientKey(req));
       return send(
         res,
         200,
@@ -2640,22 +2719,8 @@ async function handleAuthApi(req, res, url) {
         'application/json; charset=utf-8',
       );
     } catch (error) {
-      return send(
-        res,
-        error.status === 400
-          ? 400
-          : error.status === 429
-            ? 429
-            : error.status === 403
-              ? 403
-              : error.status === 503
-                ? 503
-                : 401,
-        JSON.stringify({
-          error: [400, 403, 503].includes(error.status) ? error.message : 'Email or password is incorrect.',
-        }),
-        'application/json; charset=utf-8',
-      );
+      const failure = error.data ? loginFailure(error) : { status: error.status || 500, message: error.message };
+      return send(res, failure.status, JSON.stringify({ error: failure.message }), 'application/json; charset=utf-8');
     }
   }
   if (url.pathname === '/api/auth/logout' && req.method === 'POST') {

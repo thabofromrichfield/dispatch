@@ -36,6 +36,24 @@ The repository's Vercel Node Function adapter serves the frontend assets from th
 
 The Vercel adapter stores shared state and WebRTC signaling in Supabase and uses a database lock for writes across function instances. Vercel functions are ephemeral, so maintenance (offline-timeout alerts, scheduled messages, retention cleanup, and hourly automatic backups) runs opportunistically on active write/heartbeat requests rather than on a continuous timer; it pauses when there is no app traffic. Manual backups remain available after Supabase is configured.
 
+### If sign-in fails
+
+Run one command with the same environment as the server. It checks every layer and prints the fix:
+
+```sh
+npm run check:supabase
+```
+
+| What the console says | Cause | Fix |
+| --- | --- | --- |
+| `Server credentials are missing or the Supabase URL is invalid` | Env vars absent, or `.env` not loaded, or URL missing `https://` | Set the three Supabase values in `.env` or Vercel, then redeploy |
+| `Supabase Auth is unreachable from the server` | Project paused (free projects pause after a week idle), wrong URL, or anon key rejected | Resume the project in Supabase; re-copy the URL and anon key |
+| `The dispatch_state row is missing` / `The unit tables are missing` | `supabase/schema.sql` was never run, or ran in a different project | Run the full current `supabase/schema.sql` in the SQL editor |
+| `Public sign-up is enabled in Supabase Auth` | Anyone can self-register | Supabase → Authentication → Providers → Email → disable **Allow new users to sign up** |
+| `This email address is not confirmed` at sign-in | The account was created without confirming (or `email_confirm` failed) | Confirm it in Supabase → Authentication → Users, or re-create the account from **Settings → Unit accounts & access** |
+
+Sign-in errors are also rate limited per client IP: 12 failed attempts in 15 minutes returns HTTP 429 for that IP only. Behind Vercel the limit follows the forwarded client IP, so one operator cannot lock out the rest.
+
 ### First account and user access
 
 Create the first operator login in Supabase Auth. Signed-in operators can create control-room accounts in **Settings → Unit accounts & access** and unit-bound credentials from **Units → Add unit**. Temporary passwords must be at least 14 characters; the app never stores them in Dispatch state. Field users sign into the Android Field app and receive only their mapped unit projection. Password changes remain available after sign-in. Public sign-up stays disabled.

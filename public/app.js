@@ -3993,6 +3993,8 @@ function showAuthGate(message = '', locked = false) {
   $('#authSetupNotice').textContent = message;
   $('#authError').hidden = true;
   $('#loginButton').disabled = locked;
+  const retry = $('#authRetry');
+  if (retry) retry.hidden = !locked;
 }
 function showAuthenticatedShell(user) {
   currentUser = user;
@@ -4047,9 +4049,9 @@ async function startAuthenticatedApp() {
     showAuthGate(`The secure session could not load Dispatch data: ${e.message}`);
   }
 }
-async function boot() {
+async function boot(forceCheck = false) {
   try {
-    const status = await api('/api/auth/status');
+    const status = await api(`/api/auth/status${forceCheck ? '?refresh=1' : ''}`);
     if (!status.configured) {
       showAuthGate(status.message || 'Server Supabase credentials are not configured.', true);
       return;
@@ -4058,6 +4060,8 @@ async function boot() {
       showAuthGate(status.message || 'Supabase storage is not ready.', true);
       return;
     }
+    // Non-blocking setup warning (for example, public sign-up still enabled).
+    if (status.message) showAuthGate(status.message);
     const session = await api('/api/auth/me');
     currentUser = session.user;
     await startAuthenticatedApp();
@@ -4066,6 +4070,7 @@ async function boot() {
   }
 }
 
+$('#authRetry')?.addEventListener('click', () => boot(true));
 $('#loginForm').addEventListener('submit', async (e) => {
   e.preventDefault();
   const button = $('#loginButton');
