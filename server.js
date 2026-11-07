@@ -212,9 +212,54 @@ async function cloudUserRequest(path, { accessToken, method = 'GET', body, heade
   return result;
 }
 
+// Traffic history is ~95% of the state payload and the console only reads it on the traffic,
+// review and report pages. Keeping it in row 1 meant every poll, message and SOS re-read and
+// rewrote megabytes. It now lives in its own dispatch_state row and is loaded on demand.
+const TRAFFIC_ROW_ID = 2;
+let trafficRowAvailable = true;
+let trafficRowsLoaded = false;
+let trafficDirty = false;
+
+async function ensureTrafficRows({ fresh = false } = {}) {
+  if (trafficRowsLoaded && !fresh) return Array.isArray(state.traffic) ? state.traffic : [];
+  trafficRowsLoaded = true;
+  state.traffic = Array.isArray(state.traffic) ? state.traffic : [];
+  if (!trafficRowAvailable) return state.traffic;
+  try {
+    const rows = await cloudRequest(`/rest/v1/dispatch_state?select=payload&id=eq.${TRAFFIC_ROW_ID}`);
+    const stored = rows?.[0]?.payload?.traffic;
+    if (Array.isArray(stored) && stored.length) state.traffic = stored;
+  } catch (error) {
+    if ([400, 404, 406].includes(error.status)) trafficRowAvailable = false;
+  }
+  return state.traffic;
+}
+
+async function persistTrafficRows(traffic) {
+  const rows = (Array.isArray(traffic) ? traffic : []).slice(-STATE_LIMITS.traffic);
+  if (!rows.length) return;
+  try {
+    trafficDirty = false;
+    await cloudRequest('/rest/v1/dispatch_state?on_conflict=id', {
+      method: 'POST',
+      headers: { Prefer: 'resolution=merge-duplicates,return=minimal' },
+      body: JSON.stringify({ id: TRAFFIC_ROW_ID, payload: { traffic: rows }, updated_at: now() }),
+    });
+  } catch (error) {
+    // Deployments whose schema still constrains dispatch_state to a single row keep the old
+    // behaviour: traffic stays inside the main payload instead of failing the write.
+    if ([400, 409, 422].includes(error.status)) trafficRowAvailable = false;
+    else throw error;
+  }
+}
+
 async function persistCloudSnapshot(snapshot, locationRows = []) {
   let lastError;
-  const payload = unitSchemaReady ? compactCloudSnapshot(snapshot) : structuredClone(snapshot);
+  const trafficChanged = trafficDirty && trafficRowAvailable;
+  if (trafficChanged) await persistTrafficRows(snapshot.traffic);
+  const hot = { ...snapshot };
+  if (trafficRowAvailable) delete hot.traffic;
+  const payload = unitSchemaReady ? compactCloudSnapshot(hot) : structuredClone(hot);
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       if (unitSchemaReady) {
@@ -302,6 +347,9 @@ async function initializeCloud() {
     state.locationEventIds = state.locationEventIds.slice(-2000);
     state.relays ||= [];
     state.settings ||= {};
+    state.traffic = Array.isArray(state.traffic) ? state.traffic : [];
+    trafficRowsLoaded = state.traffic.length > 0;
+    if (trafficRowsLoaded) trafficDirty = true;
     trimState(state);
     locationEventSet.clear();
     for (const key of state.locationEventIds) locationEventSet.add(key);
@@ -331,6 +379,9 @@ async function refreshCloudState() {
   state.locationEventIds = state.locationEventIds.slice(-2000);
   state.relays ||= [];
   state.settings ||= {};
+  state.traffic = Array.isArray(state.traffic) ? state.traffic : [];
+  trafficRowsLoaded = state.traffic.length > 0;
+  if (trafficRowsLoaded) trafficDirty = true;
   trimState(state);
   locationEventSet.clear();
   for (const key of state.locationEventIds) locationEventSet.add(key);
@@ -873,6 +924,7 @@ async function sampleTomTomTraffic(siteId, { force = false } = {}) {
     throw Object.assign(new Error('Configure TOMTOM_API_KEY in the server .env or set the key in Settings'), {
       status: 409,
     });
+  await ensureTrafficRows();
   const previous = latestSiteTraffic(site.id);
   if (!force && previous && Date.now() - Date.parse(previous.at) < 5 * 60 * 1000)
     return { reading: previous, sampled: false };
@@ -880,6 +932,7 @@ async function sampleTomTomTraffic(siteId, { force = false } = {}) {
   state.traffic.push(reading);
   if (state.traffic.length > STATE_LIMITS.traffic)
     state.traffic.splice(0, state.traffic.length - STATE_LIMITS.traffic);
+  trafficDirty = true;
   await save();
   return { reading, sampled: true };
 }
@@ -889,6 +942,7 @@ async function sampleTomTomTrafficBatch({ force = false } = {}) {
     throw Object.assign(new Error('Configure TOMTOM_API_KEY in the server .env or set the key in Settings'), {
       status: 409,
     });
+  await ensureTrafficRows();
   const pending = state.sites
     .filter((site) => site.areaType === 'work')
     .filter((site) => {
@@ -914,6 +968,7 @@ async function sampleTomTomTrafficBatch({ force = false } = {}) {
     state.traffic.push(...readings);
     if (state.traffic.length > STATE_LIMITS.traffic)
       state.traffic.splice(0, state.traffic.length - STATE_LIMITS.traffic);
+    trafficDirty = true;
     await save();
   }
   if (!readings.length && errors.length) throw Object.assign(new Error(errors[0].error), { status: 502 });
@@ -1220,7 +1275,9 @@ const requestListener = async (req, res) => {
         .filter(
           (p) =>
             p.peerId !== url.searchParams.get('exclude') &&
-            (!officerId || p.officerId === officerId) &&
+            // Control-room endpoints are not tied to a unit: a field phone must see them or the
+            // app can never ring the control room.
+            (!officerId || p.role === 'control' || p.officerId === officerId) &&
             (!role || p.role === role) &&
             (p.role !== 'field' || state.officers.some((o) => o.id === p.officerId && o.shiftId && !o.stunned)),
         )
@@ -1446,6 +1503,7 @@ const requestListener = async (req, res) => {
       return res.end(bytes);
     }
     if (req.method === 'GET' && url.pathname === '/api/export') {
+      await ensureTrafficRows();
       const format = url.searchParams.get('format') || 'csv',
         type = url.searchParams.get('type') || 'officers';
       const rows =
@@ -1483,11 +1541,16 @@ const requestListener = async (req, res) => {
     }
     if (req.method === 'GET' && url.pathname.startsWith('/api/traffic/tiles/flow/'))
       return serveTomTomTrafficTile(res, url);
+    if (req.method === 'GET' && url.pathname === '/api/traffic') {
+      const traffic = await ensureTrafficRows({ fresh: true });
+      return send(res, 200, JSON.stringify({ traffic, updatedAt: state.updatedAt }), 'application/json; charset=utf-8');
+    }
     if (req.method === 'POST' && url.pathname === '/api/traffic') {
       try {
         const b = await readBody(req),
           site = state.sites.find((x) => x.id === b.siteId);
         if (!site) throw Error('Unknown site');
+        await ensureTrafficRows();
         const currentSpeed = Number(b.currentSpeed),
           freeFlowSpeed = Number(b.freeFlowSpeed);
         if (!Number.isFinite(currentSpeed) || !Number.isFinite(freeFlowSpeed) || freeFlowSpeed <= 0)
@@ -1515,7 +1578,9 @@ const requestListener = async (req, res) => {
           provider: 'TomTom',
         };
         state.traffic.push(reading);
-        if (state.traffic.length > 100000) state.traffic.splice(0, 1000);
+        if (state.traffic.length > STATE_LIMITS.traffic)
+          state.traffic.splice(0, state.traffic.length - STATE_LIMITS.traffic);
+        trafficDirty = true;
         await save();
         return send(res, 200, JSON.stringify({ ok: true, reading }), 'application/json; charset=utf-8');
       } catch (e) {
@@ -1888,7 +1953,20 @@ function action(b) {
               receivedAt: at,
             }
           : null,
-        previous = state.alerts.find(
+        pressKey = String(b.raisedAt || at),
+        repeatOfPress = state.alerts.find(
+          (x) => x.type === 'sos' && x.officerId === o.id && String(x.phonePressedAt || '') === pressKey,
+        );
+      // A phone (or its offline queue) can resend the same press minutes later. That must never
+      // raise a second alarm, not even after control has already resolved the first one.
+      if (repeatOfPress) {
+        if (repeatOfPress.status === 'raised') {
+          repeatOfPress.lastRaisedAt = at;
+          repeatOfPress.events.push({ status: 'repeated', at, by: actor });
+        }
+        return { alert: repeatOfPress.id, duplicate: true };
+      }
+      const previous = state.alerts.find(
           (x) =>
             x.type === 'sos' &&
             x.officerId === o.id &&

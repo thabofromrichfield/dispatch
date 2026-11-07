@@ -317,13 +317,13 @@ function pageDataSignature(page) {
     o.signal,
     o.color,
   ];
-  const latestTraffic = S.traffic?.at(-1);
+  const latestTrafficReading = trafficLog.at(-1);
   const trafficMeta = [
-    S.traffic?.length || 0,
-    latestTraffic?.id,
-    latestTraffic?.at,
-    latestTraffic?.level,
-    latestTraffic?.currentSpeed,
+    trafficLog.length,
+    latestTrafficReading?.id,
+    latestTrafficReading?.at,
+    latestTrafficReading?.level,
+    latestTrafficReading?.currentSpeed,
   ];
   switch (page) {
     case 'overview':
@@ -818,8 +818,21 @@ function initMap() {
     toast(`Map initialization failed: ${e.message || e}`, true);
   }
 }
+let trafficLog = [];
+let trafficLogLoadedAt = 0;
+async function loadTrafficLog({ force = false } = {}) {
+  if (!force && Date.now() - trafficLogLoadedAt < 15000) return trafficLog;
+  try {
+    const d = await api('/api/traffic');
+    trafficLog = Array.isArray(d.traffic) ? d.traffic : [];
+    trafficLogLoadedAt = Date.now();
+    mapDataCache = null;
+    if (typeof updateTrafficSummary === 'function') updateTrafficSummary();
+  } catch {}
+  return trafficLog;
+}
 function latestTraffic(siteId, when = Infinity) {
-  return [...(S.traffic || [])].reverse().find((x) => x.siteId === siteId && Date.parse(x.at) <= when);
+  return [...trafficLog].reverse().find((x) => x.siteId === siteId && Date.parse(x.at) <= when);
 }
 function updateTrafficSummary() {
   const n = $('#trafficSummary');
@@ -1418,7 +1431,7 @@ function renderNetwork() {
 function latestReviewDate() {
   const dates = [
     ...(S.officers || []).map((o) => (o.latestHistoryAt ? dateKey(o.latestHistoryAt) : '')),
-    ...(S.traffic || []).map((t) => dateKey(t.at)),
+    ...trafficLog.map((t) => dateKey(t.at)),
   ]
     .filter(Boolean)
     .sort();
@@ -3814,7 +3827,9 @@ $('#pageContent').addEventListener('click', async (e) => {
     }
     try {
       await action('alert-status', { id: alertBtn.dataset.alert, status: alertBtn.dataset.status, note });
-    } catch {}
+    } catch (error) {
+      toast(error?.message || 'Could not update the alert.', true);
+    }
     return;
   }
   const focus = e.target.closest('[data-focus]');
@@ -3942,7 +3957,8 @@ $('#dismissAlarm').onclick = async () => {
   try {
     await action('alert-status', { id: a.id, status: 'taken', note: 'Viewed on map and acknowledged' });
     $('#alarmLayer').classList.add('hidden');
-  } catch {
+  } catch (error) {
+    toast(error?.message || 'Could not acknowledge the SOS; the alarm stays on until dispatch confirms.', true);
   } finally {
     button.disabled = false;
   }
@@ -4048,6 +4064,7 @@ async function startAuthenticatedApp() {
   showAuthenticatedShell(currentUser);
   try {
     S = await api('/api/state');
+    loadTrafficLog().catch(() => {});
     trafficOn = Boolean(
       S.settings.trafficEnabled && trafficConfigured(S.settings) && S.settings.trafficProvider !== 'here',
     );
@@ -4146,7 +4163,10 @@ async function sampleTraffic(force = false) {
     const result = await api('/api/traffic/sample', { method: 'POST', body: JSON.stringify({ force }) });
     trafficFailureCount = 0;
     trafficRetryAt = 0;
-    if (result.sampled) refresh();
+    if (result.sampled) {
+      await loadTrafficLog({ force: true });
+      refresh();
+    }
     if (result.failedCount) {
       const message = `Live flow sampled at ${result.sampledCount || 0} sites; ${result.failedCount} failed.`;
       setTrafficStatus(message, result.sampled ? '' : 'error');

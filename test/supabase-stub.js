@@ -12,6 +12,7 @@ function createSupabaseStub({
   unitState = [],
 } = {}) {
   let counter = 0;
+  let trafficRow = null;
   const accessTokens = new Map(); // token -> user
   const refreshTokens = new Map(); // token -> user
   const created = [];
@@ -114,10 +115,17 @@ function createSupabaseStub({
       if (path.startsWith('/rest/v1/rpc/')) return json(res, 200, {});
 
       if (path === '/rest/v1/dispatch_state') {
+        // Row 1 is the hot state; row 2 holds the traffic history (see TRAFFIC_ROW_ID in server.js).
+        const idMatch = /id=eq\.(\d+)/.exec(url.search);
+        const rowId = idMatch ? Number(idMatch[1]) : 1;
         if (req.method === 'POST') {
-          if (state) Object.assign(state, body.payload || {});
+          if (rowId === 1) {
+            if (state) Object.assign(state, body.payload || {});
+          } else trafficRow = body.payload || {};
           return json(res, 201);
         }
+        if (rowId === 2)
+          return json(res, 200, trafficRow ? [{ payload: trafficRow, updated_at: new Date().toISOString() }] : []);
         return json(res, 200, state ? [{ payload: state, updated_at: state.updatedAt || new Date().toISOString() }] : []);
       }
       if (path === '/rest/v1/dispatch_unit_accounts') {
