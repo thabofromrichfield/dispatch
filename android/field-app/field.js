@@ -9,6 +9,7 @@ let selectedOfficerId = localStorage.getItem(OFFICER_KEY) || '';
 let stateTimer = null;
 let stateBusy = false;
 let stateFailures = 0;
+let lastStatePollAt = 0;
 let stateRetryAt = 0;
 let rtcTimer = null;
 let rtcPeerId = '';
@@ -127,6 +128,11 @@ function statusLabel(status) {
 function stopNativeTracking() {
   try { window.DispatchNative?.stopTracking?.(); } catch (_) { }
 }
+function refreshBatteryNotice() {
+  const needed = window.DispatchNative?.needsBatteryExemption?.();
+  $('#batteryNotice').classList.toggle('hidden', needed !== true);
+}
+
 function syncNativeTracking() {
   const officer = fieldState?.officer;
   if (officer?.shiftId && officer.online && !officer.stunned) {
@@ -237,11 +243,21 @@ async function enterField() {
   await loadState();
   showPanel('field');
   clearInterval(stateTimer);
-  stateTimer = setInterval(() => loadState().catch(handleNetworkError), 3000);
+  stateTimer = setInterval(pollState, 3000);
+  refreshBatteryNotice();
   clearInterval(rtcTimer);
   rtcTimer = setInterval(() => rtcPulse().catch(() => {}), 2500);
   await rtcPulse();
 }
+function pollState() {
+  const now = Date.now();
+  // A backgrounded field app still reports GPS through the native service, so the 3-second UI poll
+  // only needs to run while someone is looking at the screen.
+  if (document.hidden && now - lastStatePollAt < 10000) return;
+  lastStatePollAt = now;
+  loadState().catch(handleNetworkError);
+}
+
 function handleNetworkError(error) {
   if (error?.status === 401) {
     clearInterval(stateTimer);
@@ -640,6 +656,13 @@ function bindEvents() {
   $('#signOutButton').addEventListener('click', () => signOut());
   window.addEventListener('online', () => { setNetworkBadge(); flushQueue().then(() => loadState()).catch(handleNetworkError); });
   window.addEventListener('offline', () => { setNetworkBadge(); });
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) { pollState(); refreshBatteryNotice(); }
+  });
+  $('#batteryButton').addEventListener('click', () => {
+    window.DispatchNative?.requestBatteryExemption?.();
+    setTimeout(refreshBatteryNotice, 1500);
+  });
 }
 
 async function boot() {

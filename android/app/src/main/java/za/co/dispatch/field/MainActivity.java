@@ -10,6 +10,7 @@ import android.graphics.Color;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.PowerManager;
 import android.view.Gravity;
 import android.view.ViewGroup;
 import android.webkit.JavascriptInterface;
@@ -447,6 +448,26 @@ public class MainActivity extends Activity {
             }
             runOnUiThread(() -> startLocationService(officerId, interval));
             return true;
+        }
+
+        @JavascriptInterface
+        public boolean needsBatteryExemption() {
+            PowerManager power = (PowerManager) getSystemService(POWER_SERVICE);
+            return power != null && !power.isIgnoringBatteryOptimizations(getPackageName());
+        }
+
+        @JavascriptInterface
+        public void requestBatteryExemption() {
+            runOnUiThread(() -> {
+                try {
+                    Intent intent = new Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
+                    intent.setData(Uri.parse("package:" + getPackageName()));
+                    startActivity(intent);
+                } catch (RuntimeException error) {
+                    try { startActivity(new Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)); }
+                    catch (RuntimeException ignored) { }
+                }
+            });
         }
 
         @JavascriptInterface
