@@ -257,3 +257,5 @@ body:has(.app-shell.map-first) .toast-root{z-index:12020}
 .app-shell.map-first.sidebar-expanded .dashboard-map .measure-panel{left:258px;width:min(310px,calc(100vw - 276px))}
 @media(max-width:900px){.app-shell.map-first.sidebar-expanded .dashboard-map .measure-panel,.app-shell.map-first:has(.sidebar.open) .dashboard-map .measure-panel{right:10px;left:auto;z-index:790;width:min(310px,calc(100vw - 20px))}}
 .measure-distance-badge{padding:4px 8px;border:1px solid rgba(14,116,144,.36);border-radius:999px;background:#ecfeff;color:#075985;font:700 10px Inter,sans-serif;white-space:nowrap;box-shadow:0 2px 9px rgba(0,0,0,.32);pointer-events:none}
+
+.auth-retry{width:100%;margin-top:8px}

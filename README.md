@@ -36,13 +36,31 @@ The repository's Vercel Node Function adapter serves the frontend assets from th
 
 The Vercel adapter stores shared state and WebRTC signaling in Supabase and uses a database lock for writes across function instances. Vercel functions are ephemeral, so maintenance (offline-timeout alerts, scheduled messages, retention cleanup, and hourly automatic backups) runs opportunistically on active write/heartbeat requests rather than on a continuous timer; it pauses when there is no app traffic. Manual backups remain available after Supabase is configured.
 
+### If sign-in fails
+
+Run one command with the same environment as the server. It checks every layer and prints the fix:
+
+```sh
+npm run check:supabase
+```
+
+| What the console says | Cause | Fix |
+| --- | --- | --- |
+| `Server credentials are missing or the Supabase URL is invalid` | Env vars absent, or `.env` not loaded, or URL missing `https://` | Set the three Supabase values in `.env` or Vercel, then redeploy |
+| `Supabase Auth is unreachable from the server` | Project paused (free projects pause after a week idle), wrong URL, or anon key rejected | Resume the project in Supabase; re-copy the URL and anon key |
+| `The dispatch_state row is missing` / `The unit tables are missing` | `supabase/schema.sql` was never run, or ran in a different project | Run the full current `supabase/schema.sql` in the SQL editor |
+| `Public sign-up is enabled in Supabase Auth` | Anyone can self-register | Supabase → Authentication → Providers → Email → disable **Allow new users to sign up** |
+| `This email address is not confirmed` at sign-in | The account was created without confirming (or `email_confirm` failed) | Confirm it in Supabase → Authentication → Users, or re-create the account from **Settings → Unit accounts & access** |
+
+Sign-in errors are also rate limited per client IP: 12 failed attempts in 15 minutes returns HTTP 429 for that IP only. Behind Vercel the limit follows the forwarded client IP, so one operator cannot lock out the rest.
+
 ### First account and user access
 
 Create the first operator login in Supabase Auth. Signed-in operators can create control-room accounts in **Settings → Unit accounts & access** and unit-bound credentials from **Units → Add unit**. Temporary passwords must be at least 14 characters; the app never stores them in Dispatch state. Field users sign into the Android Field app and receive only their mapped unit projection. Password changes remain available after sign-in. Public sign-up stays disabled.
 
 ## Data model and security
 
-The operator state remains a compact JSONB snapshot in protected `dispatch_state`. GPS fixes are stored separately in indexed `dispatch_locations`; the dashboard reads the archive through a bounded database function rather than loading every fix into the hot state payload. `dispatch_unit_state` contains one small read projection per unit and is protected by RLS against `dispatch_unit_accounts`. Field JWTs can select only their own projection and location rows; the server independently binds field actions and location uploads to the same mapped officer. Service-role access stays server-only. Snapshot and GPS writes are committed together, and concurrent Vercel writes use the database lease lock. Supabase Auth stores user credentials; the app never stores passwords.
+The operator state remains a compact JSONB snapshot in protected `dispatch_state`. GPS fixes are stored separately in indexed `dispatch_locations`; the dashboard reads the archive through a bounded database function rather than loading every fix into the hot state payload. `dispatch_unit_state` contains one small read projection per unit and is protected by RLS against `dispatch_unit_accounts`. Field JWTs can select only their own projection and location rows; the server independently binds field actions and location uploads to the same mapped officer. Service-role access stays server-only. Snapshot and GPS writes are committed together, and concurrent Vercel writes use the database lease lock. The snapshot is read at the start of every serverless request and written back on every save, so it is kept bounded: the newest 20,000 traffic readings and 200 SOS location fixes per alert are retained in hot state (older readings stay in backups), and a single stored recording is capped at 8 MB. Supabase Auth stores user credentials; the app never stores passwords.
 
 All `/api/*` operations other than the minimal auth status/login/logout routes require a verified Supabase session. Session tokens are held in HttpOnly, SameSite cookies; login attempts are rate-limited; sign-up is not exposed; control-room operators have full operational and account-management access; field accounts are restricted to one assigned unit, its relevant messages/alerts, and its row-level state/GPS records. Field requests are also checked by the server, so a field account cannot obtain operator state, reports, recordings, or backups. HTTPS is required by default for non-local sign-in. Keep the Node service behind a trusted TLS proxy and firewall; do not expose the service-role key or an unprotected port. The Supabase service-role key bypasses RLS, so keep it only in server-side environment variables (the ignored local `.env` file or the Vercel project's protected Environment Variables).
 
@@ -62,7 +80,7 @@ The local **Diagnostics** control records app-level function calls, UI actions, 
 
 ## Android field APK
 
-The native Android project is under `android/`. The APK is a lightweight field tracker only: sign-in, unit and shift selection, online/offline presence, background GPS, SOS, Dispatch app messages, and live in-app voice to control. It does not bundle the operations console, maps, reports, settings, or control-room tools. A fresh install defaults to `https://dispatch-brown-five.vercel.app`; use the **Server** button to change it. Messages are Dispatch app messages (not carrier SMS), and voice calls are in-app WebRTC calls (not cellular calls). Location uses Android GPS while clocked in and online, and queues fixes while connectivity is unavailable. The phone must reach the server over HTTPS when secure cookies are enabled. Do not use `localhost` on a physical phone. To refresh the small Android-only UI bundle, run `./scripts/sync-android-assets.sh`. Build with JDK 17 and Android SDK Platform 35:
+The native Android project is under `android/`. The APK is a lightweight field tracker only: sign-in, unit and shift selection, online/offline presence, background GPS, SOS, Dispatch app messages, and live in-app voice to control. It does not bundle the operations console, maps, reports, settings, or control-room tools. A fresh install defaults to `https://dispatch-brown-five.vercel.app`; use the **Server** button to change it. Messages are Dispatch app messages (not carrier SMS), and voice calls are in-app WebRTC calls (not cellular calls). Location uses Android GPS while clocked in and online, and queues fixes while connectivity is unavailable. The shift card shows **Unrestrict background GPS** when Android battery optimisation could suspend tracking on this phone; tap it once per device. The phone must reach the server over HTTPS when secure cookies are enabled. Do not use `localhost` on a physical phone. The small Android-only UI bundle is generated: `android/field-app` is the editable source, `android/app/src/main/assets` its build output, and the Gradle `syncFieldAssets` task re-runs `./scripts/sync-android-assets.sh` on every build (never edit the assets copy by hand; `npm test` fails if the two drift apart). Build with JDK 17 and Android SDK Platform 35:
 
 ```sh
 cd android
@@ -74,7 +92,8 @@ Build outputs are not committed to the repository; download the latest published
 ## Maps, archive and workflows
 
 - The map provides Street, Satellite and Topographic basemaps, 2D and pitched 3D perspectives, site/unit overlays, map-based geofence drawing, fit-to-units, geolocation, measurement and fullscreen. The 3D view is a pitched camera only; there is no terrain or building model layer. If the primary external street tiles fail, the map tries OpenStreetMap and reports a connection issue if tiles remain unavailable. No synthetic or locally hosted road map is included.
-- TomTom flow tiles remain full-color and require a configured key and provider attribution. Traffic history is sampled near configured work sites and stored in the Supabase state record; it is not a full historical street-network feed.
+- TomTom flow tiles remain full-color and require a configured key and provider attribution. Traffic history is sampled near configured work sites and stored in the Supabase state record; it is not a full historical street-network feed. The tile proxy skips the state load, and the console signs its tile requests with a 10-minute token issued with the state payload, so turning traffic on paints tiles without a session lookup per tile. Tiles are cached for 60 seconds in the browser and 45 seconds on the server.
+- The console registers its voice peer once per 10 seconds instead of once per second: registration is a state write and used to take the database lock on every poll tick. Polling stays at 1 Hz for call signalling and drops to 1 per 5 seconds in a hidden tab.
 - Day Review uses the same replay time for recorded traffic and GPS fixes. It does not invent positions or readings. A date without GPS fixes will show no fabricated unit locations.
 - The app includes roster/groups, shifts, alerts and SOS, dispatch messaging, WebRTC call history, recordings, live device health, reports/CSV, audit history, and Supabase-backed backups/restore. Field-to-control calls ring connected control consoles automatically; the first controller to answer takes the call. Authenticated field sessions heartbeat their online presence independently of GPS, and the configured offline threshold governs disconnect alerts. SOS reports store the press time, last-known and subsequent GPS fixes, accuracy, unit health, and connection state; dashboard SOS actions jump to the live unit position.
 - Physical radios, telemetry outputs, SIP/PSTN, external email delivery, and hardware control require separate integrations. Physical radio/relay/output controls require a connected gateway.

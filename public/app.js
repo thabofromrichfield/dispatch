@@ -200,7 +200,20 @@ async function api(url, opts = {}) {
       d = {};
     }
   } else {
-    const r = await fetch(url, { credentials: 'same-origin', headers, ...opts });
+    let r;
+    try {
+      r = await fetch(url, {
+        credentials: 'same-origin',
+        ...opts,
+        headers,
+        signal: opts.signal || AbortSignal.timeout(15000),
+      });
+    } catch (error) {
+      const timeout = error?.name === 'TimeoutError' || error?.name === 'AbortError';
+      const failure = new Error(timeout ? 'The server did not answer within 15 seconds.' : 'The server is unreachable.');
+      failure.status = timeout ? 504 : 0;
+      throw failure;
+    }
     status = r.status;
     d = status === 304 ? null : await r.json().catch(() => ({}));
   }
@@ -705,7 +718,9 @@ function mapLibreBaseTileUrl() {
   return baseTileUrl();
 }
 function trafficTilesUrl() {
-  return `${location.origin}/api/traffic/tiles/flow/relative/{z}/{x}/{y}.png`;
+  const token = S?.settings?.tileToken,
+    query = token ? `?t=${encodeURIComponent(token)}` : '';
+  return `${location.origin}/api/traffic/tiles/flow/relative/{z}/{x}/{y}.png${query}`;
 }
 function mapAttribution() {
   return mapStyle === 'satellite'
@@ -2028,11 +2043,19 @@ function stopDashboardTimers() {
   pollTimer = clockTimer = trafficTimer = null;
   stopRtcAgent();
 }
+// Registering is a state write (it takes the server's database lock), so it runs at the peer TTL
+// rate instead of once per poll. Polling stays at 1 Hz for call signalling, and slows to 1 per 5s
+// in a hidden tab so background consoles do not hammer the database.
+let rtcRegisteredAt = 0;
 async function rtcHeartbeat() {
   if (rtcPollBusy || !S || Date.now() < rtcRetryAt) return;
+  if (document.hidden && !rtcSessions.size && Date.now() - rtcRegisteredAt < 5000) return;
   rtcPollBusy = true;
   try {
-    await rtcRegister();
+    if (document.hidden || Date.now() - rtcRegisteredAt >= 10000) {
+      await rtcRegister();
+      rtcRegisteredAt = Date.now();
+    }
     const d = await api(`/api/rtc/poll?peer=${encodeURIComponent(getVoicePeerId())}`);
     rtcFailureCount = 0;
     rtcRetryAt = 0;
@@ -3964,12 +3987,17 @@ async function refresh() {
       return;
     }
     stateFailureCount++;
-    const delay = Math.min(30000, 1000 * 2 ** Math.min(stateFailureCount, 5));
-    stateRetryAt = Date.now() + delay;
     const storageDown = error.status === 503 && /supabase|storage|database/i.test(error.message);
-    $('#connectionText').textContent = storageDown ? 'Storage unavailable' : 'Reconnecting';
-    $('#connectionText').title =
-      `${storageDown ? error.message : 'Dispatch server connection is unavailable'}; retrying in about ${Math.ceil(delay / 1000)} seconds.`;
+    const delay = storageDown
+      ? Math.min(30000, 2000 * 2 ** Math.min(stateFailureCount - 1, 4))
+      : Math.min(4000, 500 * 2 ** Math.min(stateFailureCount - 1, 3));
+    stateRetryAt = Date.now() + delay;
+    // One missed poll is normal (a slow sample request); only flag a disconnect after two.
+    if (stateFailureCount >= 2) {
+      $('#connectionText').textContent = storageDown ? 'Storage unavailable' : 'Reconnecting';
+      $('#connectionText').title =
+        `${storageDown ? error.message : 'Dispatch server connection is unavailable'}; retrying in about ${Math.max(1, Math.ceil(delay / 1000))} seconds.`;
+    }
   } finally {
     statePollBusy = false;
   }
@@ -3993,6 +4021,8 @@ function showAuthGate(message = '', locked = false) {
   $('#authSetupNotice').textContent = message;
   $('#authError').hidden = true;
   $('#loginButton').disabled = locked;
+  const retry = $('#authRetry');
+  if (retry) retry.hidden = !locked;
 }
 function showAuthenticatedShell(user) {
   currentUser = user;
@@ -4047,9 +4077,9 @@ async function startAuthenticatedApp() {
     showAuthGate(`The secure session could not load Dispatch data: ${e.message}`);
   }
 }
-async function boot() {
+async function boot(forceCheck = false) {
   try {
-    const status = await api('/api/auth/status');
+    const status = await api(`/api/auth/status${forceCheck ? '?refresh=1' : ''}`);
     if (!status.configured) {
       showAuthGate(status.message || 'Server Supabase credentials are not configured.', true);
       return;
@@ -4058,6 +4088,8 @@ async function boot() {
       showAuthGate(status.message || 'Supabase storage is not ready.', true);
       return;
     }
+    // Non-blocking setup warning (for example, public sign-up still enabled).
+    if (status.message) showAuthGate(status.message);
     const session = await api('/api/auth/me');
     currentUser = session.user;
     await startAuthenticatedApp();
@@ -4066,6 +4098,7 @@ async function boot() {
   }
 }
 
+$('#authRetry')?.addEventListener('click', () => boot(true));
 $('#loginForm').addEventListener('submit', async (e) => {
   e.preventDefault();
   const button = $('#loginButton');
@@ -4113,7 +4146,7 @@ async function sampleTraffic(force = false) {
     const result = await api('/api/traffic/sample', { method: 'POST', body: JSON.stringify({ force }) });
     trafficFailureCount = 0;
     trafficRetryAt = 0;
-    if (result.sampled) await refresh();
+    if (result.sampled) refresh();
     if (result.failedCount) {
       const message = `Live flow sampled at ${result.sampledCount || 0} sites; ${result.failedCount} failed.`;
       setTrafficStatus(message, result.sampled ? '' : 'error');

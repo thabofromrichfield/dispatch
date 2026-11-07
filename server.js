@@ -155,8 +155,20 @@ async function cloudRequest(path, options = {}) {
     });
   return body;
 }
+// The whole state is one JSONB payload: it is read at the start of every Vercel request and
+// written back on every save. Unbounded history here made each round trip ~19 MB, which is why
+// requests arrived minutes late. Keep only what the console can use.
+const STATE_LIMITS = { traffic: 20000, alertHistory: 200, recordingBytes: 8 * 1024 * 1024 };
+function trimState(snapshot) {
+  if (Array.isArray(snapshot.traffic) && snapshot.traffic.length > STATE_LIMITS.traffic)
+    snapshot.traffic = snapshot.traffic.slice(-STATE_LIMITS.traffic);
+  for (const alert of snapshot.alerts || [])
+    if (Array.isArray(alert.locationHistory) && alert.locationHistory.length > STATE_LIMITS.alertHistory)
+      alert.locationHistory = alert.locationHistory.slice(-STATE_LIMITS.alertHistory);
+  return snapshot;
+}
 function compactCloudSnapshot(snapshot) {
-  const compact = structuredClone(snapshot);
+  const compact = trimState(structuredClone(snapshot));
   compact.locationEventIds = (compact.locationEventIds || []).slice(-2000);
   compact.officers = (compact.officers || []).map((officer) => {
     const history = Array.isArray(officer.history) ? officer.history : [],
@@ -290,6 +302,7 @@ async function initializeCloud() {
     state.locationEventIds = state.locationEventIds.slice(-2000);
     state.relays ||= [];
     state.settings ||= {};
+    trimState(state);
     locationEventSet.clear();
     for (const key of state.locationEventIds) locationEventSet.add(key);
     await checkUnitSchema();
@@ -318,6 +331,7 @@ async function refreshCloudState() {
   state.locationEventIds = state.locationEventIds.slice(-2000);
   state.relays ||= [];
   state.settings ||= {};
+  trimState(state);
   locationEventSet.clear();
   for (const key of state.locationEventIds) locationEventSet.add(key);
   cloudReady = true;
@@ -532,6 +546,7 @@ function clientStateForAuthenticatedUser(source = state) {
     unitSchemaReady,
     trafficKey: '',
     trafficKeyConfigured: Boolean(TOMTOM_API_KEY || String(source.settings.trafficKey || '').trim()),
+    tileToken: tileToken(),
   };
   return body;
 }
@@ -863,7 +878,8 @@ async function sampleTomTomTraffic(siteId, { force = false } = {}) {
     return { reading: previous, sampled: false };
   const reading = await fetchTomTomFlow(site, key);
   state.traffic.push(reading);
-  if (state.traffic.length > 100000) state.traffic.splice(0, 1000);
+  if (state.traffic.length > STATE_LIMITS.traffic)
+    state.traffic.splice(0, state.traffic.length - STATE_LIMITS.traffic);
   await save();
   return { reading, sampled: true };
 }
@@ -896,7 +912,8 @@ async function sampleTomTomTrafficBatch({ force = false } = {}) {
   await Promise.all(Array.from({ length: Math.min(4, pending.length) }, worker));
   if (readings.length) {
     state.traffic.push(...readings);
-    if (state.traffic.length > 100000) state.traffic.splice(0, Math.max(1000, state.traffic.length - 100000));
+    if (state.traffic.length > STATE_LIMITS.traffic)
+      state.traffic.splice(0, state.traffic.length - STATE_LIMITS.traffic);
     await save();
   }
   if (!readings.length && errors.length) throw Object.assign(new Error(errors[0].error), { status: 502 });
@@ -930,6 +947,28 @@ async function fetchTomTomTrafficTile(key, cacheKey, z, x, y) {
     if (trafficTileInFlight.get(cacheKey) === pending) trafficTileInFlight.delete(cacheKey);
   }
 }
+// A map view needs ~20 tiles at once. Verifying each one against Supabase cost a round trip per
+// tile, so the console receives a short-lived signed token with the state and the proxy trusts it.
+const TILE_TOKEN_TTL_MS = 10 * 60 * 1000;
+function tileTokenSecret() {
+  return crypto
+    .createHash('sha256')
+    .update(`dispatch-tiles:${SUPABASE_SERVICE_ROLE_KEY || 'local-dispatch'}`)
+    .digest();
+}
+function tileToken(expiresAt = Date.now() + TILE_TOKEN_TTL_MS) {
+  const expiry = String(expiresAt),
+    signature = crypto.createHmac('sha256', tileTokenSecret()).update(expiry).digest('hex').slice(0, 32);
+  return `${expiry}.${signature}`;
+}
+function tileTokenValid(token) {
+  const [expiry, signature] = String(token || '').split('.');
+  if (!expiry || !signature || !/^\d{10,16}$/.test(expiry) || !/^[0-9a-f]{32}$/.test(signature)) return false;
+  if (Number(expiry) < Date.now()) return false;
+  const expected = crypto.createHmac('sha256', tileTokenSecret()).update(expiry).digest('hex').slice(0, 32);
+  return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(signature));
+}
+
 async function serveTomTomTrafficTile(res, url) {
   const match = url.pathname.match(/^\/api\/traffic\/tiles\/flow\/relative\/(\d+)\/(\d+)\/(\d+)\.png$/);
   if (!match)
@@ -963,7 +1002,7 @@ async function serveTomTomTrafficTile(res, url) {
     const tile = await fetchTomTomTrafficTile(key, cacheKey, z, x, y);
     res.writeHead(200, {
       'Content-Type': tile.type,
-      'Cache-Control': 'private, max-age=30, stale-while-revalidate=30',
+      'Cache-Control': 'private, max-age=60, stale-while-revalidate=60',
       'X-Content-Type-Options': 'nosniff',
     });
     return res.end(tile.data);
@@ -1123,6 +1162,8 @@ const requestListener = async (req, res) => {
         }),
         'application/json; charset=utf-8',
       );
+    // Map tiles carry a short-lived token instead of a session lookup (see tileToken).
+    if (trafficTileRequest && tileTokenValid(url.searchParams.get('t'))) return serveTomTomTrafficTile(res, url);
     const authUser = await currentUser(req, res);
     if (!authUser)
       return send(res, 401, JSON.stringify({ error: 'Sign in required' }), 'application/json; charset=utf-8');
@@ -2158,6 +2199,8 @@ function action(b) {
       return {};
     }
     case 'recording-save': {
+      if (String(b.data || '').length > STATE_LIMITS.recordingBytes)
+        throw Error('Recording is larger than 8 MB. Keep field recordings short.');
       const r = {
         id: id('rec'),
         callId: b.callId || null,
@@ -2554,8 +2597,89 @@ function originAllowed(req) {
     return false;
   }
 }
+// Probe the Supabase pieces the sign-in flow depends on, so a broken deployment says which
+// layer failed instead of a generic "storage is not ready". Cached for 15s; booleans only.
+let supabaseHealthCache = { at: 0, value: null };
+async function probeSupabase(path, headers) {
+  try {
+    const response = await fetch(`${SUPABASE_URL}${path}`, {
+      headers,
+      signal: AbortSignal.timeout(2500),
+    });
+    const text = await response.text();
+    let data = null;
+    try {
+      data = text ? JSON.parse(text) : null;
+    } catch {}
+    return { ok: response.ok, status: response.status, data };
+  } catch (error) {
+    return { ok: false, status: 0, error };
+  }
+}
+async function supabaseHealth({ force = false } = {}) {
+  if (!supabaseConfigured || !supabaseBaseValid) return null;
+  if (!force && supabaseHealthCache.value && Date.now() - supabaseHealthCache.at < 15000)
+    return supabaseHealthCache.value;
+  const [settings, stateRow, adminUsers] = await Promise.all([
+    probeSupabase('/auth/v1/settings', { apikey: SUPABASE_ANON_KEY }),
+    probeSupabase('/rest/v1/dispatch_state?select=id&id=eq.1', cloudHeaders()),
+    probeSupabase('/auth/v1/admin/users?page=1&per_page=1', cloudHeaders()),
+  ]);
+  const value = {
+    auth: settings.ok,
+    database: stateRow.ok,
+    serviceRole: adminUsers.ok,
+    stateRow: stateRow.ok && Array.isArray(stateRow.data) && stateRow.data.length > 0,
+    unitSchema: unitSchemaReady,
+    signupDisabled: settings.ok ? settings.data?.disable_signup !== false : null,
+  };
+  supabaseHealthCache = { at: Date.now(), value };
+  return value;
+}
+function startupMessage(checks) {
+  if (!supabaseConfigured || !supabaseBaseValid)
+    return 'Server credentials are missing or the Supabase URL is invalid. Set SUPABASE_URL, SUPABASE_ANON_KEY and SUPABASE_SERVICE_ROLE_KEY.';
+  if (checks && !checks.auth)
+    return 'Supabase Auth is unreachable from the server. Check the project URL, the anon key, and that the Supabase project is not paused.';
+  if (checks && !checks.database)
+    return 'The Supabase database rejected the server request. Check the service-role key and that the project is not paused.';
+  if (checks && !checks.serviceRole)
+    return 'The service-role key was rejected. SUPABASE_SERVICE_ROLE_KEY must be the service_role secret key, not the anon key.';
+  if (checks && !checks.stateRow)
+    return 'The dispatch_state row is missing. Run supabase/schema.sql in the Supabase SQL editor.';
+  if (!unitSchemaReady)
+    return 'The unit tables are missing. Run the current supabase/schema.sql in the Supabase SQL editor.';
+  if (checks?.signupDisabled === false)
+    return 'Public sign-up is enabled in Supabase Auth. Disable "Allow new users to sign up" in Authentication → Providers → Email.';
+  if (!cloudReady) return cloudInitError || 'Supabase storage is not ready. Check the database schema and connection.';
+  return null;
+}
+
+// Behind Vercel or a trusted proxy every request shares the proxy's socket address, so keying
+// the limiter on remoteAddress locks all operators out after 12 failures. Use the forwarded
+// client IP there, and the socket address everywhere else so it cannot be spoofed.
+function clientKey(req) {
+  const forwarded = req.headers['x-forwarded-for'];
+  const trustedProxy = IS_VERCEL || String(process.env.DISPATCH_TRUST_PROXY || '').toLowerCase() === 'true';
+  if (trustedProxy && typeof forwarded === 'string' && forwarded.trim()) return forwarded.split(',')[0].trim();
+  return req.socket.remoteAddress || 'unknown';
+}
+function loginFailure(error) {
+  const code = String(error.data?.error_code || error.data?.error || '').toLowerCase();
+  if (error.status === 429)
+    return { status: 429, message: 'Too many sign-in attempts. Wait 15 minutes and try again.' };
+  if (code.includes('email_not_confirmed'))
+    return {
+      status: 403,
+      message:
+        'This email address is not confirmed. Confirm it in Supabase → Authentication → Users, then sign in again.',
+    };
+  if (error.status === 400 || error.status === 401 || code.includes('invalid'))
+    return { status: 401, message: 'Email or password is incorrect.' };
+  return { status: 503, message: 'Supabase Auth did not respond. Check the project URL and keys.' };
+}
 function loginRateLimited(req) {
-  const key = req.socket.remoteAddress || 'unknown',
+  const key = clientKey(req),
     entry = loginAttempts.get(key) || { count: 0, reset: Date.now() + 15 * 60 * 1000 };
   if (entry.reset < Date.now()) {
     entry.count = 0;
@@ -2566,7 +2690,8 @@ function loginRateLimited(req) {
   return entry.count > 12;
 }
 async function handleAuthApi(req, res, url) {
-  if (url.pathname === '/api/auth/status' && req.method === 'GET')
+  if (url.pathname === '/api/auth/status' && req.method === 'GET') {
+    const checks = await supabaseHealth({ force: url.searchParams.get('refresh') === '1' });
     return send(
       res,
       200,
@@ -2574,15 +2699,12 @@ async function handleAuthApi(req, res, url) {
         configured: supabaseConfigured && supabaseBaseValid,
         ready: cloudReady,
         unitSchemaReady,
-        message:
-          !supabaseConfigured || !supabaseBaseValid
-            ? 'Server credentials are not configured.'
-            : cloudReady
-              ? null
-              : cloudInitError || 'Supabase schema or connection needs attention.',
+        checks,
+        message: startupMessage(checks),
       }),
       'application/json; charset=utf-8',
     );
+  }
   if (!originAllowed(req))
     return send(res, 403, JSON.stringify({ error: 'Request origin rejected' }), 'application/json; charset=utf-8');
   if (url.pathname === '/api/auth/login' && req.method === 'POST') {
@@ -2632,7 +2754,7 @@ async function handleAuthApi(req, res, url) {
         throw Object.assign(new Error('Sign-in failed.'), { status: 401 });
       const user = await resolveAuthUser(session.user, session.access_token);
       writeSessionCookies(req, res, session);
-      loginAttempts.delete(req.socket.remoteAddress || 'unknown');
+      loginAttempts.delete(clientKey(req));
       return send(
         res,
         200,
@@ -2640,22 +2762,8 @@ async function handleAuthApi(req, res, url) {
         'application/json; charset=utf-8',
       );
     } catch (error) {
-      return send(
-        res,
-        error.status === 400
-          ? 400
-          : error.status === 429
-            ? 429
-            : error.status === 403
-              ? 403
-              : error.status === 503
-                ? 503
-                : 401,
-        JSON.stringify({
-          error: [400, 403, 503].includes(error.status) ? error.message : 'Email or password is incorrect.',
-        }),
-        'application/json; charset=utf-8',
-      );
+      const failure = error.data ? loginFailure(error) : { status: error.status || 500, message: error.message };
+      return send(res, failure.status, JSON.stringify({ error: failure.message }), 'application/json; charset=utf-8');
     }
   }
   if (url.pathname === '/api/auth/logout' && req.method === 'POST') {
@@ -3042,7 +3150,8 @@ if (IS_VERCEL) {
     const requestUrl = new URL(req.url, 'http://localhost'),
       isApi = requestUrl.pathname.startsWith('/api/');
     try {
-      if (isApi) {
+      const trafficTile = req.method === 'GET' && requestUrl.pathname.startsWith('/api/traffic/tiles/flow/');
+      if (isApi && !trafficTile) {
         await cloudInitialization;
         if (supabaseConfigured && supabaseBaseValid && !cloudReady && Date.now() - cloudInitLastAttemptAt >= 30000)
           await initializeCloud();

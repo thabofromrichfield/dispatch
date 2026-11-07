@@ -10,6 +10,7 @@ import android.graphics.Color;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.PowerManager;
 import android.view.Gravity;
 import android.view.ViewGroup;
 import android.webkit.JavascriptInterface;
@@ -128,10 +129,8 @@ public class MainActivity extends Activity {
                 return;
             }
             if (!serverBase.equals(value)) {
-                Intent stop = new Intent(this, LocationTrackingService.class);
-                stop.setAction(LocationTrackingService.ACTION_STOP);
                 preferences.edit().remove("trackingOfficer").remove(KEY_TRACKING_INTERVAL).apply();
-                try { startService(stop); } catch (RuntimeException ignored) { }
+                stopLocationService();
             }
             serverBase = value;
             preferences.edit().putString(KEY_SERVER, serverBase).apply();
@@ -145,6 +144,7 @@ public class MainActivity extends Activity {
         safety.setPadding(0, dp(22), 0, 0);
         root.addView(safety, matchWrap());
         setContentView(root);
+        applyInsets(root, dp(24));
     }
 
     private void showApp() {
@@ -192,6 +192,7 @@ public class MainActivity extends Activity {
 
         root.addView(webView, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         setContentView(root);
+        applyInsets(root, 0);
         webView.loadUrl(ASSET_ORIGIN + "/index.html");
     }
 
@@ -300,6 +301,38 @@ public class MainActivity extends Activity {
     }
 
     private int dp(float value) { return (int) (value * getResources().getDisplayMetrics().density + 0.5f); }
+
+    private void stopLocationService() {
+        try { stopService(new Intent(this, LocationTrackingService.class)); }
+        catch (RuntimeException ignored) { }
+    }
+
+    // Android 15 draws app windows edge to edge for targetSdk 35, so both screens pad themselves by
+    // the system-bar and cutout insets instead of letting content sit under the status bar.
+    private void applyInsets(android.view.View view, int basePadding) {
+        view.setOnApplyWindowInsetsListener((v, insets) -> {
+            int left;
+            int top;
+            int right;
+            int bottom;
+            if (Build.VERSION.SDK_INT >= 30) {
+                android.graphics.Insets bars = insets.getInsets(
+                        android.view.WindowInsets.Type.systemBars() | android.view.WindowInsets.Type.displayCutout());
+                left = bars.left;
+                top = bars.top;
+                right = bars.right;
+                bottom = bars.bottom;
+            } else {
+                left = insets.getSystemWindowInsetLeft();
+                top = insets.getSystemWindowInsetTop();
+                right = insets.getSystemWindowInsetRight();
+                bottom = insets.getSystemWindowInsetBottom();
+            }
+            v.setPadding(left + basePadding, top + basePadding, right + basePadding, bottom + basePadding);
+            return insets;
+        });
+        view.requestApplyInsets();
+    }
     private LinearLayout.LayoutParams matchWrap() { return new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT); }
     private LinearLayout.LayoutParams matchWidthWrap() { return matchWrap(); }
 
@@ -406,7 +439,8 @@ public class MainActivity extends Activity {
                     && interval == preferences.getInt(KEY_TRACKING_INTERVAL, 15)
                     && serverBase.equals(preferences.getString(KEY_SERVER, DEFAULT_SERVER))) return true;
             if (!hasFineLocation()) {
-                if (locationPermissionDenied) return true;
+                // Returning true here would tell the field app that GPS is sharing when it is not.
+                if (locationPermissionDenied) return false;
                 pendingOfficerId = officerId;
                 pendingInterval = interval;
                 runOnUiThread(() -> requestLocationPermission());
@@ -417,14 +451,30 @@ public class MainActivity extends Activity {
         }
 
         @JavascriptInterface
+        public boolean needsBatteryExemption() {
+            PowerManager power = (PowerManager) getSystemService(POWER_SERVICE);
+            return power != null && !power.isIgnoringBatteryOptimizations(getPackageName());
+        }
+
+        @JavascriptInterface
+        public void requestBatteryExemption() {
+            runOnUiThread(() -> {
+                try {
+                    Intent intent = new Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
+                    intent.setData(Uri.parse("package:" + getPackageName()));
+                    startActivity(intent);
+                } catch (RuntimeException error) {
+                    try { startActivity(new Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)); }
+                    catch (RuntimeException ignored) { }
+                }
+            });
+        }
+
+        @JavascriptInterface
         public void stopTracking() {
             if (preferences.getString("trackingOfficer", null) == null) return;
             preferences.edit().remove("trackingOfficer").remove(KEY_TRACKING_INTERVAL).apply();
-            runOnUiThread(() -> {
-                Intent intent = new Intent(context, LocationTrackingService.class);
-                intent.setAction(LocationTrackingService.ACTION_STOP);
-                try { startService(intent); } catch (RuntimeException ignored) { }
-            });
+            runOnUiThread(MainActivity.this::stopLocationService);
         }
     }
 

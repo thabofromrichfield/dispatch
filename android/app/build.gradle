@@ -10,8 +10,21 @@ android {
         applicationId 'za.co.dispatch.field'
         minSdk 26
         targetSdk 35
-        versionCode 2
-        versionName '1.1.0'
+        versionCode 4
+        versionName '1.2.1'
+    }
+
+    // Both CI workflows used to sign with the runner's throwaway debug keystore, so every new APK
+    // had a different signature and Android refused to install it over the previous release. This
+    // shared keystore keeps updates installable. It is a debug-grade key for sideload distribution;
+    // rotate it by replacing the file and bumping the version.
+    signingConfigs {
+        debug {
+            storeFile file('keystore/dispatch-field.jks')
+            storePassword 'dispatch-field'
+            keyAlias 'dispatch-field'
+            keyPassword 'dispatch-field'
+        }
     }
 
     compileOptions {
@@ -23,3 +36,13 @@ android {
 dependencies {
     implementation 'androidx.webkit:webkit:1.12.1'
 }
+
+// The field web app under android/field-app is the editable source; app/src/main/assets is its
+// build output. Regenerate it before every build so an APK can never ship stale JavaScript.
+tasks.register('syncFieldAssets', Exec) {
+    description = 'Copies android/field-app and native-bridge.js into app/src/main/assets'
+    workingDir rootProject.projectDir.parentFile
+    commandLine 'sh', 'scripts/sync-android-assets.sh'
+}
+
+tasks.named('preBuild') { dependsOn 'syncFieldAssets' }
