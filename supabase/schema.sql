@@ -2,10 +2,14 @@
 -- Global operational tables have no anon/authenticated access. Only explicitly scoped unit
 -- tables expose authenticated reads, enforced by per-unit RLS policies below.
 create table if not exists public.dispatch_state (
-  id smallint primary key check (id = 1),
+  id smallint primary key check (id between 1 and 8),
   payload jsonb not null,
   updated_at timestamptz not null default now()
 );
+-- Row 1 is the hot dispatch state; row 2 holds the traffic history so that polls, messages and
+-- SOS alerts never rewrite megabytes. Older installs were created with "check (id = 1)": relax it.
+alter table public.dispatch_state drop constraint if exists dispatch_state_id_check;
+alter table public.dispatch_state add constraint dispatch_state_id_check check (id between 1 and 8);
 alter table public.dispatch_state enable row level security;
 revoke all on table public.dispatch_state from public, anon, authenticated;
 grant select, insert, update, delete on table public.dispatch_state to service_role;

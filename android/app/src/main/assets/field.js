@@ -110,7 +110,7 @@ function render() {
   $('#trackingNote').textContent = onShift && online
     ? `GPS sharing is active at ${Number(officer.config?.locationInterval || fieldState.settings?.locationInterval || 15)} second intervals.`
     : 'Location is shared only while clocked in and online.';
-  const sos = (fieldState.alerts || [])[0];
+  const sos = (fieldState.alerts || []).find(alert => alert.type === 'sos' && alert.status !== 'handled');
   $('#sosNotice').classList.toggle('hidden', !sos);
   $('#sosNotice').textContent = sos ? `SOS active · raised ${formatTime(sos.raisedAt)}${sos.offline ? ' · phone was offline' : ''}` : '';
   $('#lastContact').textContent = `Last sync ${new Date().toLocaleTimeString('en-ZA', {hour:'2-digit',minute:'2-digit'})}`;
@@ -243,10 +243,10 @@ async function enterField() {
   await loadState();
   showPanel('field');
   clearInterval(stateTimer);
-  stateTimer = setInterval(pollState, 3000);
+  stateTimer = setInterval(pollState, 2000);
   refreshBatteryNotice();
   clearInterval(rtcTimer);
-  rtcTimer = setInterval(() => rtcPulse().catch(() => {}), 2500);
+  rtcTimer = setInterval(() => rtcPulse().catch(() => {}), 2000);
   await rtcPulse();
 }
 function pollState() {

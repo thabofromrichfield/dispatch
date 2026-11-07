@@ -128,12 +128,17 @@ test('the persisted state stays bounded when history is huge', async (t) => {
   const saves = stub.requests.filter((request) => request.path.includes('dispatch_save_snapshot'));
   assert.ok(saves.length > 0, 'a snapshot save should reach Supabase');
   const payload = saves.at(-1).body.p_payload;
-  assert.ok(Array.isArray(payload.traffic));
-  assert.ok(payload.traffic.length <= 20000, `traffic kept ${payload.traffic.length} rows`);
-  assert.equal(payload.traffic.at(-1).id, 'traffic-024999', 'the newest readings are kept');
+  assert.ok(!Array.isArray(payload.traffic), 'the hot state no longer carries traffic history');
   assert.ok(payload.alerts[0].locationHistory.length <= 200, 'SOS location history is bounded');
 
   const bytes = JSON.stringify(payload).length;
-  t.diagnostic(`persisted snapshot: ${(bytes / 1048576).toFixed(2)} MB (was ~19 MB uncapped)`);
-  assert.ok(bytes < 5 * 1024 * 1024, `snapshot is ${(bytes / 1048576).toFixed(1)} MB, expected under 5 MB`);
+  t.diagnostic(`hot state payload: ${(bytes / 1024).toFixed(0)} KB (was ~3.1 MB with traffic inline)`);
+  // Every poll, message and SOS rewrites this row, so it has to stay small.
+  assert.ok(bytes < 512 * 1024, `hot state is ${(bytes / 1024).toFixed(0)} KB, expected under 512 KB`);
+
+  const trafficWrites = stub.requests.filter((request) => request.body && request.body.id === 2);
+  assert.ok(trafficWrites.length > 0, 'traffic history is written to its own row');
+  const storedTraffic = trafficWrites.at(-1).body.payload.traffic;
+  assert.ok(storedTraffic.length <= 20000, `traffic kept ${storedTraffic.length} rows`);
+  assert.equal(storedTraffic.at(-1).id, 'traffic-024999', 'the newest readings are kept');
 });
